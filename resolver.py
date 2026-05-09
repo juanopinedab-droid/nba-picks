@@ -1,15 +1,18 @@
 """
-resolver.py — Resolución automática de resultados NBA.
+resolver.py — Resolución automática de resultados NBA + CLV tracking.
 
 Consulta la ESPN API para obtener marcadores finales y stats de jugadores,
 y marca cada pick pendiente como WIN / LOSS / PUSH sin intervención manual.
+También guarda cuotas de cierre para calcular Closing Line Value (CLV).
 
 Uso directo:
-    python resolver.py
-    python resolver.py --fecha 2026-05-08
+    python resolver.py                      # resuelve pendientes
+    python resolver.py --fecha 2026-05-08   # fecha específica
+    python resolver.py --cerrar             # guarda cuotas de cierre (antes del partido)
 
 Integrado en picks.py:
     python picks.py --resolver
+    python picks.py --cerrar
 """
 
 import re
@@ -396,6 +399,192 @@ def print_resolve_summary(summary: dict):
     if summary.get("SKIP"):   print(f"  ⏳  Sin resolver: {summary['SKIP']}")
     if summary.get("ERROR"):  print(f"  ❓  Error:        {summary['ERROR']}")
     print(f"{'━'*50}\n")
+
+
+# ─── CLV — CLOSING LINE VALUE ────────────────────────────────────────────────
+
+def _american_to_prob(odds: int) -> float:
+    if odds < 0:
+        return abs(odds) / (abs(odds) + 100)
+    return 100 / (odds + 100)
+
+
+def _fetch_current_nba_odds() -> list[dict]:
+    """Cuotas actuales NBA desde The Odds API (1 request)."""
+    url = "https://api.the-odds-api.com/v4/sports/basketball_nba/odds"
+    params = {
+        "apiKey":     config.ODDS_API_KEY,
+        "regions":    "us",
+        "markets":    "h2h,spreads,totals",
+        "oddsFormat": "american",
+        "dateFormat": "iso",
+    }
+    try:
+        r = requests.get(url, params=params, timeout=15)
+        r.raise_for_status()
+        remaining = r.headers.get("x-requests-remaining", "?")
+        print(f"  [API] Requests restantes: {remaining}")
+        return r.json()
+    except Exception as e:
+        print(f"  ⚠️  Odds API error: {e}")
+        return []
+
+
+def _find_closing_odds(pick: dict, odds_games: list) -> int | None:
+    """
+    Busca en la lista de juegos actuales la cuota de cierre para un pick.
+    Devuelve cuota en formato americano, o None si el juego ya no está disponible.
+    """
+    import collector as _col
+
+    game_str = pick["game"]   # "Away @ Home"
+    bet_type = pick["bet_type"]
+    selection = pick["selection"]
+
+    try:
+        away_raw, home_raw = game_str.split(" @ ", 1)
+    except ValueError:
+        return None
+
+    away_l = away_raw.strip().lower()
+    home_l = home_raw.strip().lower()
+
+    # Encontrar el juego en la respuesta de la API
+    target = None
+    for g in odds_games:
+        gh = g.get("home_team", "").lower()
+        ga = g.get("away_team", "").lower()
+        if (home_l in gh or gh in home_l) and (away_l in ga or ga in away_l):
+            target = g
+            break
+
+    if not target:
+        return None  # Juego ya empezó o no está disponible
+
+    # Extraer odds con la misma lógica que el collector
+    odds_data = _col._extract_best_odds(
+        target.get("bookmakers", []),
+        target["home_team"],
+        target["away_team"],
+    )
+    if not odds_data:
+        return None
+
+    home_name = target["home_team"]
+    away_name = target["away_team"]
+
+    if bet_type == "MONEYLINE":
+        team = _parse_moneyline(selection)
+        if team and _team_match(team, home_name):
+            return odds_data.get("h2h_home")
+        if team and _team_match(team, away_name):
+            return odds_data.get("h2h_away")
+
+    elif bet_type == "SPREAD":
+        parsed = _parse_spread(selection)
+        if parsed:
+            team, _ = parsed
+            if _team_match(team, home_name):
+                return odds_data.get("spread_home")
+            if _team_match(team, away_name):
+                return odds_data.get("spread_away")
+
+    elif bet_type == "TOTAL":
+        parsed = _parse_total(selection)
+        if parsed:
+            direction, _ = parsed
+            return odds_data.get("total_over") if direction == "Over" else odds_data.get("total_under")
+
+    return None
+
+
+def save_closing_odds_for_pending() -> int:
+    """
+    Guarda las cuotas de cierre (≈ cuota actual) para todos los picks NBA
+    pendientes que aún no tienen closing_odds registrado.
+    Ejecutar 1-2 horas antes del inicio de los partidos.
+    Retorna el número de picks actualizados.
+    """
+    pending = database.get_pending_with_details()
+    # Solo picks NBA con commence_time y sin closing_odds ya guardado
+    targets = [
+        p for p in pending
+        if p.get("sport", "nba") == "nba"
+        and p.get("commence_time")
+        and p.get("closing_odds") is None
+    ]
+
+    if not targets:
+        print("  ✅  Todos los picks pendientes ya tienen cuota de cierre.")
+        return 0
+
+    print(f"  Buscando cuotas de cierre para {len(targets)} picks...\n")
+    odds_games = _fetch_current_nba_odds()
+    if not odds_games:
+        return 0
+
+    updated = 0
+    for pick in targets:
+        closing = _find_closing_odds(pick, odds_games)
+        if closing is None:
+            print(f"  ⏳  [{pick['id']}] {pick['selection'][:45]:<45} — juego no disponible aún")
+            continue
+
+        opening = pick["odds"]
+        # CLV = prob_implícita(cierre) - prob_implícita(apertura)
+        # Positivo = mercado se movió a nuestro favor = buena señal
+        clv = _american_to_prob(closing) - _american_to_prob(opening)
+        database.save_closing_odds(pick["id"], closing, clv)
+
+        arrow  = "▲" if clv >= 0 else "▼"
+        color  = "\033[92m" if clv >= 0 else "\033[91m"
+        reset  = "\033[0m"
+        clv_str = f"{clv:+.1%}"
+        print(f"  {color}{arrow}{reset}  [{pick['id']}] {pick['selection'][:40]:<40}"
+              f"  apertura {opening:+d}  →  cierre {closing:+d}  "
+              f"CLV {color}{clv_str}{reset}")
+        updated += 1
+
+    print(f"\n  {updated} picks actualizados.")
+    return updated
+
+
+def print_clv_summary():
+    """Muestra resumen de CLV del historial completo."""
+    data = database.get_clv_summary()
+    if not data or data["n"] == 0:
+        print("  Sin datos de CLV aún. Ejecuta --cerrar antes de cada jornada.")
+        return
+
+    avg   = data["avg_clv"]
+    pct   = data["positive_pct"]
+    color = "\033[92m" if avg >= 0 else "\033[91m"
+    reset = "\033[0m"
+
+    print(f"\n  {'━'*50}")
+    print(f"  {BOLD}📈  CLOSING LINE VALUE (CLV){RESET}")
+    print(f"  {'━'*50}")
+    print(f"  Picks con CLV registrado: {data['n']}")
+    print(f"  CLV promedio:   {color}{avg:+.2%}{reset}  "
+          f"({'POSITIVO ✅' if avg >= 0 else 'NEGATIVO ⚠️'})")
+    print(f"  % picks con CLV > 0:  {pct:.0%}")
+    if data["avg_clv_win"] is not None:
+        print(f"  CLV promedio en WINs:   {data['avg_clv_win']:+.2%}")
+    if data["avg_clv_loss"] is not None:
+        print(f"  CLV promedio en LOSSes: {data['avg_clv_loss']:+.2%}")
+
+    # Interpretación
+    print(f"\n  {'─'*50}")
+    if avg >= 0.02:
+        msg = "🔥 Modelo con edge real. El mercado confirma tus selecciones."
+    elif avg >= 0:
+        msg = "✅ CLV levemente positivo. Sigue acumulando datos."
+    elif avg >= -0.02:
+        msg = "⚠️  CLV cerca de cero. Revisar criterios de selección."
+    else:
+        msg = "❌ CLV negativo. El mercado se mueve en contra. Recalibrar modelo."
+    print(f"  {msg}")
+    print(f"  {'━'*50}\n")
 
 
 # ─── ENTRY POINT ─────────────────────────────────────────────────────────────

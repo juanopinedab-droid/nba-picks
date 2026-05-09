@@ -368,6 +368,9 @@ def show_record():
             prof_str = f"{'+'if s['profit']>=0 else ''}{s['profit']:,.0f}"
             print(f"  {s['tipo']:<20} {s['wins']:>4} {l:>4} "
                   f"  {s['wagered']:>10,.0f}   {prof_str:>10}  {roi_str:>7}")
+
+    # CLV — métrca de calidad del modelo
+    resolver.print_clv_summary()
     print()
 
 
@@ -385,6 +388,8 @@ def main():
                         help="Analizar solo el partido de ese equipo (parcial, ej: 'Lakers')")
     parser.add_argument("--resolver", action="store_true",
                         help="Resolver automáticamente picks pendientes con resultados ESPN")
+    parser.add_argument("--cerrar", action="store_true",
+                        help="Guardar cuotas de cierre para calcular CLV (correr antes del partido)")
     parser.add_argument("--fecha", metavar="YYYY-MM-DD",
                         help="Con --resolver: solo picks de esa fecha")
     args = parser.parse_args()
@@ -402,6 +407,13 @@ def main():
 
     elif args.historial:
         show_record()
+
+    elif args.cerrar:
+        print(f"\n{BOLD}{'━'*58}{RESET}")
+        print(f"{BOLD}  📉  CUOTAS DE CIERRE — CLV{RESET}")
+        print(f"{BOLD}{'━'*58}{RESET}\n")
+        resolver.save_closing_odds_for_pending()
+        resolver.print_clv_summary()
 
     elif args.resolver:
         from datetime import date as _date

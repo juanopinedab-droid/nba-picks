@@ -45,6 +45,8 @@ def setup():
             ("profit_cop",    "REAL DEFAULT 0"),
             ("sport",         "TEXT DEFAULT 'nba'"),
             ("commence_time", "TEXT"),
+            ("closing_odds",  "INTEGER"),
+            ("clv",           "REAL"),
         ]:
             if col not in existing:
                 conn.execute(f"ALTER TABLE picks ADD COLUMN {col} {definition}")
@@ -163,12 +165,47 @@ def get_pending():
     return rows
 
 
+def save_closing_odds(pick_id: int, closing_odds: int, clv: float):
+    """Guarda cuota de cierre y CLV para un pick."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE picks SET closing_odds = ?, clv = ? WHERE id = ?",
+            (closing_odds, round(clv, 4), pick_id)
+        )
+        conn.commit()
+
+
+def get_clv_summary() -> dict | None:
+    """Estadísticas de CLV para evaluar la calidad del modelo."""
+    with get_conn() as conn:
+        row = conn.execute("""
+            SELECT
+                COUNT(*)                                          as n,
+                AVG(clv)                                          as avg_clv,
+                SUM(CASE WHEN clv > 0 THEN 1 ELSE 0 END)         as positive,
+                AVG(CASE WHEN result='WIN'  THEN clv END)         as avg_clv_win,
+                AVG(CASE WHEN result='LOSS' THEN clv END)         as avg_clv_loss
+            FROM picks
+            WHERE clv IS NOT NULL
+        """).fetchone()
+    if not row or not row[0]:
+        return None
+    n = row[0]
+    return {
+        "n":              n,
+        "avg_clv":        row[1] or 0,
+        "positive_pct":   (row[2] or 0) / n,
+        "avg_clv_win":    row[3],
+        "avg_clv_loss":   row[4],
+    }
+
+
 def get_pending_with_details() -> list[dict]:
     """Picks pendientes con todos los campos necesarios para el resolver."""
     with get_conn() as conn:
         rows = conn.execute("""
             SELECT id, date, game, bet_type, selection, odds,
-                   stake_cop, sport, commence_time
+                   stake_cop, sport, commence_time, closing_odds, clv
             FROM picks
             WHERE result = 'PENDING'
             ORDER BY commence_time ASC
@@ -184,6 +221,8 @@ def get_pending_with_details() -> list[dict]:
             "stake_cop":     r[6],
             "sport":         r[7] or "nba",
             "commence_time": r[8] or "",
+            "closing_odds":  r[9],
+            "clv":           r[10],
         }
         for r in rows
     ]
