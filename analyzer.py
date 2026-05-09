@@ -259,23 +259,43 @@ def analyze_game(game: dict, home_stats: dict, away_stats: dict,
     reasons.append(f"Datos LOCAL:     {_data_source_label(home_stats)}")
     reasons.append(f"Datos VISITANTE: {_data_source_label(away_stats)}")
 
-    # --- Net Rating: blend 60% temporada / 40% forma reciente ---
+    # --- Net Rating: split home/away + blend 60% temporada / 40% forma reciente ---
     _W_SEASON = 0.60
     _W_RECENT = 0.40
 
-    def _blended_nr(stats: dict, label: str) -> tuple[float, str]:
-        season_nr = stats["net_rating"]
+    def _blended_nr(stats: dict, label: str, location: str) -> tuple[float, str]:
+        """
+        Usa el NRtg del split correspondiente (home para LOCAL, away para VISITANTE).
+        Si no hay split disponible, cae a NRtg global.
+        Luego mezcla con forma reciente (60/40).
+        """
+        # Elegir NRtg base según si el equipo juega de local o visitante
+        if location == "home" and stats.get("net_rating_home") is not None:
+            season_nr   = stats["net_rating_home"]
+            split_label = "casa"
+        elif location == "away" and stats.get("net_rating_away") is not None:
+            season_nr   = stats["net_rating_away"]
+            split_label = "visita"
+        else:
+            season_nr   = stats["net_rating"]
+            split_label = "global"
+
+        global_nr = stats["net_rating"]
         recent_nr = stats.get("recent_nr")
         n_games   = stats.get("recent_games", 0)
+
         if recent_nr is not None:
             blended = round(_W_SEASON * season_nr + _W_RECENT * recent_nr, 2)
-            note = (f"NRtg {label}: temporada {season_nr:+.1f} | "
-                    f"últimos {n_games}j {recent_nr:+.1f} → blend {blended:+.1f}")
+            note = (f"NRtg {label} [{split_label}]: {season_nr:+.1f} | "
+                    f"global {global_nr:+.1f} | "
+                    f"últ.{n_games}j {recent_nr:+.1f} → blend {blended:+.1f}")
             return blended, note
-        return season_nr, f"NRtg {label}: {season_nr:+.1f} (sin forma reciente)"
+        note = (f"NRtg {label} [{split_label}]: {season_nr:+.1f} "
+                f"(global {global_nr:+.1f})")
+        return season_nr, note
 
-    home_nr, home_nr_note = _blended_nr(home_stats, "LOCAL")
-    away_nr, away_nr_note = _blended_nr(away_stats, "VISITANTE")
+    home_nr, home_nr_note = _blended_nr(home_stats, "LOCAL",     location="home")
+    away_nr, away_nr_note = _blended_nr(away_stats, "VISITANTE", location="away")
     reasons.append(home_nr_note)
     reasons.append(away_nr_note)
 

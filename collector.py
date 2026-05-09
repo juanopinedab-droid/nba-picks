@@ -8,12 +8,16 @@ from nba_api.stats.static import players as nba_players_static
 import config
 
 # Cache en memoria para no repetir llamadas a nba_api en la misma sesión
-_regular_team_cache:   dict = {}
-_playoff_team_cache:   dict = {}
-_regular_player_cache: dict = {}
-_playoff_player_cache: dict = {}
-_gamelog_cache:        dict = {}
-_player_recent_cache:  dict = {}  # {player_name: {stat: valor, _source, _games}}
+_regular_team_cache:      dict = {}
+_playoff_team_cache:      dict = {}
+_regular_home_cache:      dict = {}   # splits de local
+_regular_away_cache:      dict = {}   # splits de visitante
+_playoff_home_cache:      dict = {}
+_playoff_away_cache:      dict = {}
+_regular_player_cache:    dict = {}
+_playoff_player_cache:    dict = {}
+_gamelog_cache:           dict = {}
+_player_recent_cache:     dict = {}  # {player_name: {stat: valor, _source, _games}}
 
 
 # ─── UTILIDADES ──────────────────────────────────────────────────────────────
@@ -81,6 +85,43 @@ def _fetch_team_stats_for_season_type(season_type: str) -> dict:
             "losses":     int(row.get("L", 0)),
         }
 
+    return result
+
+
+def _fetch_team_splits(season_type: str, location: str) -> dict:
+    """
+    Descarga Net Rating / Off / Def / Pace filtrado por LOCAL o VISITANTE.
+    location: "Home" | "Road"
+    Retorna dict keyed por abreviatura con net_rating, off_rating, def_rating, pace.
+    """
+    time.sleep(1)
+    try:
+        endpoint = LeagueDashTeamStats(
+            season=config.NBA_SEASON,
+            measure_type_detailed_defense="Advanced",
+            per_mode_detailed="PerGame",
+            season_type_all_star=season_type,
+            location_nullable=location,
+        )
+        df = endpoint.get_data_frames()[0]
+    except Exception as e:
+        print(f"  ⚠️  Home/Away splits error ({season_type}/{location}): {e}")
+        return {}
+
+    abbr_col     = next((c for c in df.columns if "ABBREVIATION" in c), None)
+    name_to_abbr = _name_to_abbr_map()
+    result = {}
+
+    for _, row in df.iterrows():
+        abbr = row[abbr_col] if abbr_col else name_to_abbr.get(row.get("TEAM_NAME", ""), "")
+        if not abbr:
+            continue
+        result[abbr] = {
+            "net_rating": float(row.get("NET_RATING", row.get("E_NET_RATING", 0))),
+            "off_rating": float(row.get("OFF_RATING", row.get("E_OFF_RATING", 0))),
+            "def_rating": float(row.get("DEF_RATING", row.get("E_DEF_RATING", 0))),
+            "pace":       float(row.get("PACE",       row.get("E_PACE",       0))),
+        }
     return result
 
 
@@ -245,11 +286,14 @@ def _extract_best_odds(bookmakers: list, home: str, away: str) -> dict | None:
 
 def get_team_stats(team_name: str) -> dict | None:
     """
-    Retorna stats mezcladas de regular season + playoffs.
-    Descarga ambas fuentes la primera vez y las cachea.
+    Retorna stats mezcladas de regular season + playoffs, incluyendo
+    splits de home (net_rating_home) y away (net_rating_away).
     """
     global _regular_team_cache, _playoff_team_cache
+    global _regular_home_cache, _regular_away_cache
+    global _playoff_home_cache, _playoff_away_cache
 
+    # ── Stats globales ────────────────────────────────────────────────────────
     if not _regular_team_cache:
         print("  [NBA API] Stats equipos — Regular Season...", end=" ", flush=True)
         _regular_team_cache = _fetch_team_stats_for_season_type("Regular Season")
@@ -259,12 +303,41 @@ def get_team_stats(team_name: str) -> dict | None:
         print("  [NBA API] Stats equipos — Playoffs...", end=" ", flush=True)
         try:
             _playoff_team_cache = _fetch_team_stats_for_season_type("Playoffs")
-            n = len(_playoff_team_cache)
-            print(f"OK ({n} equipos con datos)")
+            print(f"OK ({len(_playoff_team_cache)} equipos)")
         except Exception as e:
             print(f"Sin datos ({e})")
             _playoff_team_cache = {}
 
+    # ── Splits home/away ──────────────────────────────────────────────────────
+    if not _regular_home_cache:
+        print("  [NBA API] Splits LOCAL — Regular Season...", end=" ", flush=True)
+        _regular_home_cache = _fetch_team_splits("Regular Season", "Home")
+        print("OK")
+
+    if not _regular_away_cache:
+        print("  [NBA API] Splits VISITANTE — Regular Season...", end=" ", flush=True)
+        _regular_away_cache = _fetch_team_splits("Regular Season", "Road")
+        print("OK")
+
+    if not _playoff_home_cache:
+        print("  [NBA API] Splits LOCAL — Playoffs...", end=" ", flush=True)
+        try:
+            _playoff_home_cache = _fetch_team_splits("Playoffs", "Home")
+            print(f"OK ({len(_playoff_home_cache)} equipos)")
+        except Exception as e:
+            print(f"Sin datos ({e})")
+            _playoff_home_cache = {}
+
+    if not _playoff_away_cache:
+        print("  [NBA API] Splits VISITANTE — Playoffs...", end=" ", flush=True)
+        try:
+            _playoff_away_cache = _fetch_team_splits("Playoffs", "Road")
+            print(f"OK ({len(_playoff_away_cache)} equipos)")
+        except Exception as e:
+            print(f"Sin datos ({e})")
+            _playoff_away_cache = {}
+
+    # ── Blend global ──────────────────────────────────────────────────────────
     abbr    = config.TEAM_MAP.get(team_name)
     regular = _regular_team_cache.get(abbr)
     playoff = _playoff_team_cache.get(abbr)
@@ -273,7 +346,32 @@ def get_team_stats(team_name: str) -> dict | None:
         return None
 
     playoff_gp = playoff.get("wins", 0) + playoff.get("losses", 0) if playoff else 0
-    return _blend(regular, playoff, playoff_gp)
+    blended = _blend(regular, playoff, playoff_gp)
+
+    # ── Inyectar splits home/away (con blend RS + playoffs) ───────────────────
+    def _blend_split(reg_split: dict | None, po_split: dict | None, po_gp: int) -> float | None:
+        """Blend del NRtg del split, usando misma proporción que el blend global."""
+        if not reg_split:
+            return None
+        reg_nr = reg_split.get("net_rating", 0)
+        if not po_split or po_gp == 0:
+            return reg_nr
+        po_nr = po_split.get("net_rating", 0)
+        w_p   = min(0.65, po_gp / 15)
+        return round(w_p * po_nr + (1 - w_p) * reg_nr, 2)
+
+    blended["net_rating_home"] = _blend_split(
+        _regular_home_cache.get(abbr),
+        _playoff_home_cache.get(abbr),
+        playoff_gp,
+    )
+    blended["net_rating_away"] = _blend_split(
+        _regular_away_cache.get(abbr),
+        _playoff_away_cache.get(abbr),
+        playoff_gp,
+    )
+
+    return blended
 
 
 def get_all_player_season_stats() -> dict:
