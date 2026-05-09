@@ -26,6 +26,10 @@ _NBA_AVG_TOTAL = 225.0  # Total promedio NBA para normalizar
 _LEAGUE_AVG_DEF  = 112.5  # DEF_RATING promedio NBA 2024-25
 _DEF_SENSITIVITY = {"PTS": 0.8, "FG3M": 0.65, "REB": 0.25, "AST": 0.20}
 
+# Constantes para modelo de totales basado en pace
+_NBA_AVG_PACE   = 98.5   # Posesiones por 48 min, promedio liga 2024-25
+_TOTAL_STD      = 13.0   # Desviación estándar histórica de totales NBA (pts)
+
 
 def _normal_cdf(x: float, mean: float, std: float) -> float:
     """Probabilidad acumulada normal — sin dependencias externas."""
@@ -375,6 +379,14 @@ def analyze_game(game: dict, home_stats: dict, away_stats: dict,
         if spread_pick:
             picks.append(spread_pick)
 
+    # --- Evaluar TOTAL con modelo de pace ---
+    total_pick = _analyze_total(
+        game, home_stats, away_stats,
+        home_b2b, away_b2b, reasons
+    )
+    if total_pick:
+        picks.append(total_pick)
+
     return {
         "game":            f"{game['away_team']} @ {game['home_team']}",
         "home_record":     f"{home_stats['wins']}-{home_stats['losses']}",
@@ -436,6 +448,105 @@ def _analyze_spread(game: dict, net_diff: float,
             )
 
     return None
+
+
+def _analyze_total(game: dict, home_stats: dict, away_stats: dict,
+                   home_b2b: bool, away_b2b: bool, reasons: list) -> dict | None:
+    """
+    Evalúa Over/Under usando pace y ratings ofensivos/defensivos reales de cada equipo.
+
+    Fórmula estándar de proyección de totales NBA:
+      combined_pace  = (home_pace + away_pace) / 2
+      home_pts_proj  = (home_off_rtg + away_def_rtg) / 2  *  combined_pace / 100
+      away_pts_proj  = (away_off_rtg + home_def_rtg) / 2  *  combined_pace / 100
+      projected_total = home_pts_proj + away_pts_proj
+
+    La intuición: blend del ataque propio vs la defensa rival, escalado por posesiones reales.
+    Un partido OKC (pace 101) vs BOS (pace 96) tendrá ~98.5 posesiones → ~225 puntos.
+    Un partido MEM (pace 104) vs ATL (pace 102) tendrá ~103 posesiones → más scoring.
+    """
+    if not game.get("total_over") or not game.get("total_under"):
+        return None
+
+    total_line = game.get("total_line")
+    if total_line is None:
+        return None
+
+    # Stats necesarias del collector
+    home_pace = home_stats.get("pace")
+    away_pace = away_stats.get("pace")
+    home_off  = home_stats.get("off_rating")
+    away_off  = away_stats.get("off_rating")
+    home_def  = home_stats.get("def_rating")
+    away_def  = away_stats.get("def_rating")
+
+    if any(v is None for v in [home_pace, away_pace, home_off, away_off, home_def, away_def]):
+        return None  # Sin datos suficientes para el modelo
+
+    combined_pace = (home_pace + away_pace) / 2
+
+    # Puntos proyectados: blend ataque propio + defensa rival, escalado por pace
+    home_pts = (home_off + away_def) / 2 * combined_pace / 100
+    away_pts  = (away_off + home_def) / 2 * combined_pace / 100
+
+    # Ajuste B2B: la fatiga baja el ataque y sube los puntos concedidos
+    # Efecto neto en el total: ~2-3 pts menos por equipo en B2B
+    if home_b2b:
+        home_pts *= 0.975   # -2.5% anotación por fatiga
+        away_pts *= 1.015   # +1.5% rival aprovecha defensa baja
+    if away_b2b:
+        away_pts *= 0.975
+        home_pts *= 1.015
+
+    projected_total = home_pts + away_pts
+
+    # Std dev del total: escala con pace (juegos más rápidos = más varianza)
+    pace_factor = combined_pace / _NBA_AVG_PACE
+    total_std   = _TOTAL_STD * pace_factor
+
+    # Probabilidades con distribución normal
+    p_over  = 1 - _normal_cdf(total_line, projected_total, total_std)
+    p_under = 1 - p_over
+
+    # Implied sin vig
+    raw_over  = american_to_prob(game["total_over"])
+    raw_under = american_to_prob(game["total_under"])
+    impl_over, impl_under = remove_vig(raw_over, raw_under)
+
+    best_is_over = p_over >= p_under
+    our_prob  = p_over    if best_is_over else p_under
+    impl_prob = impl_over if best_is_over else impl_under
+    direction = "Over"    if best_is_over else "Under"
+    odds      = game["total_over"] if best_is_over else game["total_under"]
+
+    edge = our_prob - impl_prob
+
+    if our_prob < 0.52 or edge < config.MIN_EDGE:
+        return None
+
+    diff_str = f"{projected_total - total_line:+.1f}"
+    b2b_note = ""
+    if home_b2b or away_b2b:
+        b2b_note = f" | B2B {'LOCAL' if home_b2b else 'VISIT.'}: ajuste fatiga aplicado"
+
+    return _build_pick(
+        game=game,
+        bet_type="TOTAL",
+        selection=f"{direction} {total_line}",
+        odds=odds,
+        our_prob=our_prob,
+        implied_prob=impl_prob,
+        edge=edge,
+        reasons=reasons + [
+            (f"Pace: LOCAL {home_pace:.1f} | VISIT. {away_pace:.1f} "
+             f"→ combinado {combined_pace:.1f} pos/48min"),
+            (f"Pts proyectados: LOCAL {home_pts:.1f} + VISIT. {away_pts:.1f} "
+             f"= {projected_total:.1f}{b2b_note}"),
+            (f"Línea: {total_line} | Proyección: {projected_total:.1f} ({diff_str}) "
+             f"| σ={total_std:.1f}"),
+            f"P({direction}): {our_prob:.1%} | Casa: {impl_prob:.1%}",
+        ],
+    )
 
 
 def _build_pick(game: dict, bet_type: str, selection: str, odds: int,
