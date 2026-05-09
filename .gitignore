@@ -1,0 +1,26 @@
+# Secretos y configuración local
+.env
+*.env
+
+# Bases de datos locales (datos personales de apuestas)
+picks_history.db
+backtest_data.db
+
+# Cache de datos (se regenera automáticamente)
+football_cache.json
+__pycache__/
+*.pyc
+*.pyo
+
+# IDEs
+.vscode/
+.idea/
+*.code-workspace
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# CLAUDE.md contiene instrucciones del agente, no es necesario para el repo
+# (comentar esta línea si quieres incluirlo)
+# CLAUDE.md
