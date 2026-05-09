@@ -12,19 +12,21 @@ def setup():
     with get_conn() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS picks (
-                id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                date         TEXT,
-                game         TEXT,
-                bet_type     TEXT,
-                selection    TEXT,
-                odds         INTEGER,
-                our_prob     REAL,
-                implied_prob REAL,
-                edge         REAL,
-                confidence   TEXT,
-                stake_cop    REAL DEFAULT 0,
-                result       TEXT DEFAULT 'PENDING',
-                profit_cop   REAL DEFAULT 0
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                date           TEXT,
+                game           TEXT,
+                bet_type       TEXT,
+                selection      TEXT,
+                odds           INTEGER,
+                our_prob       REAL,
+                implied_prob   REAL,
+                edge           REAL,
+                confidence     TEXT,
+                stake_cop      REAL DEFAULT 0,
+                result         TEXT DEFAULT 'PENDING',
+                profit_cop     REAL DEFAULT 0,
+                sport          TEXT DEFAULT 'nba',
+                commence_time  TEXT
             )
         """)
         conn.execute("""
@@ -39,8 +41,10 @@ def setup():
         # Migración: agregar columnas que pueden faltar en DBs existentes
         existing = {r[1] for r in conn.execute("PRAGMA table_info(picks)").fetchall()}
         for col, definition in [
-            ("stake_cop",  "REAL DEFAULT 0"),
-            ("profit_cop", "REAL DEFAULT 0"),
+            ("stake_cop",     "REAL DEFAULT 0"),
+            ("profit_cop",    "REAL DEFAULT 0"),
+            ("sport",         "TEXT DEFAULT 'nba'"),
+            ("commence_time", "TEXT"),
         ]:
             if col not in existing:
                 conn.execute(f"ALTER TABLE picks ADD COLUMN {col} {definition}")
@@ -53,19 +57,27 @@ def save_pick(pick: dict, stake_cop: float = 0):
 
     # Deduplicación: no guardar el mismo pick dos veces en el mismo día
     with get_conn() as conn:
-        exists = conn.execute("""
+        existing = conn.execute("""
             SELECT id FROM picks
             WHERE date = ? AND selection = ? AND bet_type = ?
         """, (today, pick["selection"], pick["bet_type"])).fetchone()
 
-        if exists:
-            return  # Ya está guardado hoy
+        if existing:
+            # Si ya existe, actualizar stake si se envió uno
+            if stake_cop:
+                conn.execute(
+                    "UPDATE picks SET stake_cop = ? WHERE id = ?",
+                    (stake_cop, existing[0])
+                )
+                conn.commit()
+            return
 
         conn.execute("""
             INSERT INTO picks
               (date, game, bet_type, selection, odds,
-               our_prob, implied_prob, edge, confidence, stake_cop)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               our_prob, implied_prob, edge, confidence,
+               stake_cop, sport, commence_time)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             today,
             pick["game"],
@@ -77,6 +89,8 @@ def save_pick(pick: dict, stake_cop: float = 0):
             pick["edge"],
             pick["confidence"],
             stake_cop,
+            pick.get("sport", "nba"),
+            pick.get("commence_time", ""),
         ))
         conn.commit()
 
@@ -147,6 +161,32 @@ def get_pending():
             ORDER BY date DESC
         """).fetchall()
     return rows
+
+
+def get_pending_with_details() -> list[dict]:
+    """Picks pendientes con todos los campos necesarios para el resolver."""
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT id, date, game, bet_type, selection, odds,
+                   stake_cop, sport, commence_time
+            FROM picks
+            WHERE result = 'PENDING'
+            ORDER BY commence_time ASC
+        """).fetchall()
+    return [
+        {
+            "id":            r[0],
+            "date":          r[1],
+            "game":          r[2],
+            "bet_type":      r[3],
+            "selection":     r[4],
+            "odds":          r[5],
+            "stake_cop":     r[6],
+            "sport":         r[7] or "nba",
+            "commence_time": r[8] or "",
+        }
+        for r in rows
+    ]
 
 
 def get_roi_summary() -> dict:

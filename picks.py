@@ -1,11 +1,18 @@
+# -*- coding: utf-8 -*-
+import sys, io
+if sys.stdout.encoding != "utf-8":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
 """
 NBA Picks del día — uso personal
-Ejecutar: python picks.py
-Marcar resultado: python picks.py --resultado 3 WIN
-Ver historial: python picks.py --historial
+Ejecutar:            python picks.py
+Marcar resultado:    python picks.py --resultado 3 WIN
+Ver pendientes:      python picks.py --pendientes
+Ver historial:       python picks.py --historial
+Resolver automático: python picks.py --resolver
 """
 
-import sys
 import argparse
 from datetime import date
 
@@ -15,6 +22,7 @@ import analyzer
 import parlays
 import bankroll
 import config
+import resolver
 
 
 CONF_EMOJI = {"ALTA": "🔥", "MEDIA": "✅", "BAJA": "⚠️"}
@@ -213,6 +221,12 @@ def run_picks(partido: str | None = None):
         result["home_injured_questionable"] = home_impact["questionable"]
         result["away_injured_out"]          = away_impact["out"]
         result["away_injured_questionable"] = away_impact["questionable"]
+        # Inyectar commence_time y sport para resolver automático después
+        commence = game.get("commence_time", "")
+        for pick in result["picks"]:
+            pick["commence_time"] = commence
+            pick["sport"]         = "nba"
+
         game_results.append(result)
         all_game_picks.extend(result["picks"])
 
@@ -236,6 +250,10 @@ def run_picks(partido: str | None = None):
                     home_stats=home_stats_adj,
                     away_stats=away_stats_adj,
                 )
+                # Inyectar commence_time y sport también en props
+                for pick in prop_picks:
+                    pick["commence_time"] = commence
+                    pick["sport"]         = "nba"
                 all_prop_picks.extend(prop_picks)
 
     # ── SECCIÓN 1: PARTIDOS ───────────────────────────────────
@@ -365,6 +383,10 @@ def main():
                         help="Ver record histórico")
     parser.add_argument("--partido", metavar="EQUIPO",
                         help="Analizar solo el partido de ese equipo (parcial, ej: 'Lakers')")
+    parser.add_argument("--resolver", action="store_true",
+                        help="Resolver automáticamente picks pendientes con resultados ESPN")
+    parser.add_argument("--fecha", metavar="YYYY-MM-DD",
+                        help="Con --resolver: solo picks de esa fecha")
     args = parser.parse_args()
 
     if args.resultado:
@@ -380,6 +402,23 @@ def main():
 
     elif args.historial:
         show_record()
+
+    elif args.resolver:
+        from datetime import date as _date
+        target = None
+        if args.fecha:
+            try:
+                target = _date.fromisoformat(args.fecha)
+            except ValueError:
+                print(f"  ❌  Fecha inválida: {args.fecha} (usa YYYY-MM-DD)")
+                return
+        print(f"\n{BOLD}{'━'*58}{RESET}")
+        print(f"{BOLD}  🔍  RESOLVER — Resultados NBA{RESET}")
+        print(f"{BOLD}{'━'*58}{RESET}\n")
+        summary = resolver.auto_resolve_all(target_date=target)
+        resolver.print_resolve_summary(summary)
+        if any(summary.get(k) for k in ("WIN", "LOSS", "PUSH")):
+            show_record()
 
     else:
         run_picks(partido=args.partido)
