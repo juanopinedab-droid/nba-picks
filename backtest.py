@@ -28,7 +28,7 @@ BACKTEST_DB   = "backtest_data.db"
 SEASONS       = ["2023-24", "2024-25"]
 ROLLING_GAMES = 15          # Ventana de forma reciente
 HOME_ADV      = 3.0         # Puntos de ventaja local (ajustable)
-K_RANGE       = [round(x * 0.01, 2) for x in range(5, 30)]  # 0.05 a 0.29
+K_RANGE       = [round(x * 0.01, 2) for x in range(3, 51)]  # 0.03 a 0.50
 
 
 # ─── BASE DE DATOS LOCAL ──────────────────────────────────────────────────────
@@ -434,10 +434,12 @@ def run_backtest(seasons: list[str]):
     print(f"\n  🎯 k ÓPTIMO ENCONTRADO: {best_k}")
     print(f"     (el modelo usa actualmente k=0.15)")
 
-    if best_k != 0.15:
-        print(f"\n  ⚠️  ACCIÓN REQUERIDA: cambia k de 0.15 a {best_k} en analyzer.py línea 148")
+    current_k = 0.08  # Sincronizar con analyzer.py manualmente si cambia
+    if best_k != current_k:
+        print(f"\n  ⚠️  ACCIÓN REQUERIDA: cambia k de {current_k} a {best_k} en analyzer.py")
+        print(f"     Busca: k = {current_k}  # Calibrado con backtest.py")
     else:
-        print(f"\n  ✅  El k actual (0.15) ya es el óptimo.")
+        print(f"\n  ✅  El k actual ({current_k}) ya es el óptimo.")
 
     print(f"\n  Brier Score:   {best_bs:.4f}  (0.25 = aleatorio | 0.00 = perfecto)")
     print(f"  Accuracy:      {accuracy:.1%}  (% de ganadores predichos correctamente)")
