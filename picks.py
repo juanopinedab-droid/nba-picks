@@ -196,20 +196,28 @@ def run_picks(partido: str | None = None):
         home_form = collector.get_team_recent_form(home)
         away_form = collector.get_team_recent_form(away)
 
+        # Travel fatigue y H2H (reutiliza gamelog cacheado — sin llamadas extra)
+        home_travel = collector.get_consecutive_away_games(home)
+        away_travel = collector.get_consecutive_away_games(away)
+        h2h_edge    = collector.get_h2h_edge(home, away)
+
         # Ajuste por lesiones: copias para no mutar el caché
         home_impact = collector.get_team_injury_impact(home, injury_report, player_stats)
         away_impact = collector.get_team_injury_impact(away, injury_report, player_stats)
         home_stats_adj = {
             **home_stats,
-            "net_rating":    home_stats["net_rating"] + home_impact["adjustment"],
-            "recent_nr":     home_form["recent_nr"] if home_form else None,
-            "recent_games":  home_form["games"]     if home_form else 0,
+            "net_rating":     home_stats["net_rating"] + home_impact["adjustment"],
+            "recent_nr":      home_form["recent_nr"] if home_form else None,
+            "recent_games":   home_form["games"]     if home_form else 0,
+            "travel_fatigue": home_travel,
+            "h2h_edge":       h2h_edge,
         }
         away_stats_adj = {
             **away_stats,
-            "net_rating":    away_stats["net_rating"] + away_impact["adjustment"],
-            "recent_nr":     away_form["recent_nr"] if away_form else None,
-            "recent_games":  away_form["games"]     if away_form else 0,
+            "net_rating":     away_stats["net_rating"] + away_impact["adjustment"],
+            "recent_nr":      away_form["recent_nr"] if away_form else None,
+            "recent_games":   away_form["games"]     if away_form else 0,
+            "travel_fatigue": away_travel,
         }
 
         # Análisis de partido (moneyline + spread)

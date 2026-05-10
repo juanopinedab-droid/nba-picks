@@ -43,6 +43,7 @@ def setup_db():
             CREATE TABLE IF NOT EXISTS games (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
                 season       TEXT,
+                season_type  TEXT DEFAULT 'Regular Season',
                 game_id      TEXT,
                 game_date    TEXT,
                 team_abbr    TEXT,
@@ -59,27 +60,35 @@ def setup_db():
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_team ON games(team_abbr, game_date)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_game ON games(game_id)")
+
+        # Migración: agregar season_type si no existe en la tabla
+        existing_cols = {r[1] for r in conn.execute("PRAGMA table_info(games)").fetchall()}
+        if "season_type" not in existing_cols:
+            conn.execute("ALTER TABLE games ADD COLUMN season_type TEXT DEFAULT 'Regular Season'")
+
         conn.commit()
 
 
-def games_exist(season: str) -> bool:
+def games_exist(season: str, season_type: str = "Regular Season") -> bool:
     with get_conn() as conn:
         n = conn.execute(
-            "SELECT COUNT(*) FROM games WHERE season=?", (season,)
+            "SELECT COUNT(*) FROM games WHERE season=? AND season_type=?",
+            (season, season_type)
         ).fetchone()[0]
     return n > 0
 
 
 # ─── DESCARGA ─────────────────────────────────────────────────────────────────
 
-def download_season(season: str):
-    print(f"  Descargando {season}...", end=" ", flush=True)
+def download_season(season: str, season_type: str = "Regular Season"):
+    label = "PO" if season_type == "Playoffs" else "RS"
+    print(f"  Descargando {season} ({label})...", end=" ", flush=True)
     time.sleep(1)
 
     try:
         log = LeagueGameLog(
             season=season,
-            season_type_all_star="Regular Season",
+            season_type_all_star=season_type,
             direction="ASC",
         )
         df = log.get_data_frames()[0]
@@ -87,36 +96,41 @@ def download_season(season: str):
         print(f"ERROR: {e}")
         return
 
+    if df.empty:
+        print("Sin datos")
+        return
+
     rows = []
     for _, row in df.iterrows():
         matchup = str(row.get("MATCHUP", ""))
         is_home = int("vs." in matchup)
-
-        # Oponente: extraer pts del mismo game_id, equipo contrario
-        # Por ahora guardamos pts y luego cruzamos
         rows.append((
             season,
-            str(row.get("GAME_ID",     "")),
-            str(row.get("GAME_DATE",   "")),
+            season_type,
+            str(row.get("GAME_ID",           "")),
+            str(row.get("GAME_DATE",         "")),
             str(row.get("TEAM_ABBREVIATION", "")),
             is_home,
-            str(row.get("WL",          "")),
-            int(row.get("PTS",          0)),
-            0,          # opp_pts: se calcula después
-            float(row.get("PLUS_MINUS", 0)),
-            int(row.get("FGA",          0)),
-            int(row.get("FTA",          0)),
-            int(row.get("OREB",         0)),
-            int(row.get("TOV",          0)),
+            str(row.get("WL",                "")),
+            int(row.get("PTS",                0)),
+            0,
+            float(row.get("PLUS_MINUS",       0)),
+            int(row.get("FGA",                0)),
+            int(row.get("FTA",                0)),
+            int(row.get("OREB",               0)),
+            int(row.get("TOV",                0)),
         ))
 
     with get_conn() as conn:
-        conn.execute("DELETE FROM games WHERE season=?", (season,))
+        conn.execute(
+            "DELETE FROM games WHERE season=? AND season_type=?",
+            (season, season_type)
+        )
         conn.executemany("""
             INSERT INTO games
-              (season, game_id, game_date, team_abbr, is_home, wl,
+              (season, season_type, game_id, game_date, team_abbr, is_home, wl,
                pts, opp_pts, plus_minus, fga, fta, oreb, tov)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, rows)
 
         # Calcular opp_pts cruzando mismo game_id
@@ -125,11 +139,10 @@ def download_season(season: str):
                 SELECT g2.pts FROM games g2
                 WHERE g2.game_id = games.game_id
                   AND g2.team_abbr != games.team_abbr
-                  AND g2.season = games.season
                 LIMIT 1
             )
-            WHERE season = ?
-        """, (season,))
+            WHERE season = ? AND season_type = ?
+        """, (season, season_type))
         conn.commit()
 
     n = len(rows) // 2
@@ -137,14 +150,16 @@ def download_season(season: str):
 
 
 def download_all(seasons: list[str]):
-    print("\n  📥  Descargando datos históricos...\n")
+    print("\n  📥  Descargando datos históricos (Regular Season + Playoffs)...\n")
     setup_db()
     for s in seasons:
-        if games_exist(s):
-            print(f"  {s}: ya descargado, saltando.")
-        else:
-            download_season(s)
-            time.sleep(1.5)
+        for stype in ("Regular Season", "Playoffs"):
+            if games_exist(s, stype):
+                label = "PO" if stype == "Playoffs" else "RS"
+                print(f"  {s} ({label}): ya descargado, saltando.")
+            else:
+                download_season(s, stype)
+                time.sleep(1.5)
     print()
 
 
@@ -224,13 +239,16 @@ def predict(home_pm: float, away_pm: float,
             home_b2b: bool, away_b2b: bool,
             home_rest: int, away_rest: int,
             k: float) -> float:
-    """Replica exacta de analyzer.py — misma lógica, mismo modelo."""
+    """Replica de analyzer.py — misma lógica y ajustes."""
     adj = HOME_ADV
     if home_b2b:
         adj -= 3.5
     if away_b2b:
         adj += 3.5
-    adj += (home_rest - away_rest) * 0.5
+    # Rest bonus: tanh evita bonus irreales (alineado con analyzer.py)
+    rest_bonus = math.tanh((home_rest - away_rest) / 2) * 1.5
+    if abs(rest_bonus) >= 0.5:
+        adj += rest_bonus
 
     net_diff = (home_pm + adj) - away_pm
     return sigmoid(net_diff, k)
@@ -270,26 +288,46 @@ def calibration_buckets(predictions: list[tuple[float, int]], n_buckets: int = 1
 
 
 def simulated_roi(predictions: list[tuple[float, int, float]],
-                  edge_min: float = 0.04) -> dict:
+                  edge_min: float = 0.04,
+                  realistic: bool = False) -> dict:
     """
-    ROI simulado asumiendo juego a -110 (cuota estándar).
-    Solo cuenta picks donde nuestro edge >= edge_min.
-    predictions: [(our_prob, actual_outcome, implied_prob), ...]
+    ROI simulado.
+    realistic=False → asume -110 plano (cota optimista).
+    realistic=True  → payout basado en probabilidad del modelo con 5% vig
+                       (asume el libro precio igual al modelo — cota conservadora).
+    predictions: [(our_prob_home, home_won, implied_prob_home), ...]
     """
     wins = losses = wagered = profit = 0
 
     for our_prob, outcome, impl_prob in predictions:
-        edge = our_prob - impl_prob
-        if edge < edge_min:
-            continue
+        home_edge = our_prob - impl_prob
+        away_edge = (1 - our_prob) - (1 - impl_prob)  # = impl_prob - our_prob
 
-        wagered += 1
-        if outcome == 1:
-            profit += 100 / 110    # Paga ~0.909 unidades
-            wins   += 1
-        else:
-            profit -= 1
-            losses += 1
+        bet_home = home_edge >= edge_min and our_prob >= 0.52
+        bet_away = away_edge >= edge_min and (1 - our_prob) >= 0.52
+
+        def _payout(win_prob: float) -> float:
+            if realistic:
+                # Fair odds minus 5% vig: payout = (1-p)/p * 0.95
+                return max((1 - win_prob) / win_prob * 0.95, 0.15)
+            return 100 / 110
+
+        if bet_home:
+            wagered += 1
+            if outcome == 1:
+                profit += _payout(our_prob)
+                wins   += 1
+            else:
+                profit -= 1
+                losses += 1
+        elif bet_away:  # elif: nunca apostar los dos lados del mismo partido
+            wagered += 1
+            if outcome == 0:  # visitante ganó
+                profit += _payout(1 - our_prob)
+                wins   += 1
+            else:
+                profit -= 1
+                losses += 1
 
     total = wins + losses
     return {
@@ -312,7 +350,7 @@ def run_backtest(seasons: list[str]):
     # Cargar todos los juegos con sus dos equipos
     with get_conn() as conn:
         game_ids = conn.execute("""
-            SELECT DISTINCT game_id, game_date, season
+            SELECT DISTINCT game_id, game_date, season, season_type
             FROM games
             WHERE season IN ({})
             ORDER BY game_date ASC
@@ -321,7 +359,7 @@ def run_backtest(seasons: list[str]):
     dataset = []
     skipped = 0
 
-    for game_id, game_date, season in game_ids:
+    for game_id, game_date, season, season_type in game_ids:
         with get_conn() as conn:
             rows = conn.execute("""
                 SELECT team_abbr, is_home, wl, pts, opp_pts
@@ -360,19 +398,20 @@ def run_backtest(seasons: list[str]):
         impl_prob = 0.5238  # -110 estándar sin vig → ~52.4%
 
         dataset.append({
-            "game_id":    game_id,
-            "game_date":  game_date,
-            "season":     season,
-            "home_abbr":  home_abbr,
-            "away_abbr":  away_abbr,
-            "home_pm":    home_pm,
-            "away_pm":    away_pm,
-            "home_b2b":   home_b2b_,
-            "away_b2b":   away_b2b_,
-            "home_rest":  home_rest_,
-            "away_rest":  away_rest_,
-            "home_won":   home_won,
-            "impl_prob":  impl_prob,
+            "game_id":     game_id,
+            "game_date":   game_date,
+            "season":      season,
+            "season_type": season_type,
+            "home_abbr":   home_abbr,
+            "away_abbr":   away_abbr,
+            "home_pm":     home_pm,
+            "away_pm":     away_pm,
+            "home_b2b":    home_b2b_,
+            "away_b2b":    away_b2b_,
+            "home_rest":   home_rest_,
+            "away_rest":   away_rest_,
+            "home_won":    home_won,
+            "impl_prob":   impl_prob,
         })
 
     total = len(dataset)
@@ -424,6 +463,23 @@ def run_backtest(seasons: list[str]):
     roi_4    = simulated_roi(preds_full, edge_min=0.04)
     roi_6    = simulated_roi(preds_full, edge_min=0.06)
     roi_8    = simulated_roi(preds_full, edge_min=0.08)
+    roi_4r   = simulated_roi(preds_full, edge_min=0.04, realistic=True)
+    roi_6r   = simulated_roi(preds_full, edge_min=0.06, realistic=True)
+    roi_8r   = simulated_roi(preds_full, edge_min=0.08, realistic=True)
+
+    # ── Breakdown por tipo de temporada ──────────────────────────────────────────
+    rs_idx = [i for i, g in enumerate(dataset) if g["season_type"] == "Regular Season"]
+    po_idx = [i for i, g in enumerate(dataset) if g["season_type"] == "Playoffs"]
+
+    def _accuracy(indices):
+        if not indices:
+            return None, 0
+        preds = [preds_full[i] for i in indices]
+        acc   = sum(1 for p, o, _ in preds if (p >= 0.5) == (o == 1)) / len(preds)
+        return acc, len(preds)
+
+    rs_acc, rs_n = _accuracy(rs_idx)
+    po_acc, po_n = _accuracy(po_idx)
 
     # ── Output ────────────────────────────────────────────────
     print(f"{'━'*60}")
@@ -432,11 +488,10 @@ def run_backtest(seasons: list[str]):
     print(f"\n  Temporadas:    {', '.join(seasons)}")
     print(f"  Partidos:      {total}")
     print(f"\n  🎯 k ÓPTIMO ENCONTRADO: {best_k}")
-    print(f"     (el modelo usa actualmente k=0.15)")
 
-    current_k = 0.08  # Sincronizar con analyzer.py manualmente si cambia
+    current_k = 0.08  # Sincronizar con analyzer.py:net_rating_to_prob() si cambia
     if best_k != current_k:
-        print(f"\n  ⚠️  ACCIÓN REQUERIDA: cambia k de {current_k} a {best_k} en analyzer.py")
+        print(f"\n  ⚠️  ACCIÓN REQUERIDA: cambia k={current_k} → k={best_k} en analyzer.py")
         print(f"     Busca: k = {current_k}  # Calibrado con backtest.py")
     else:
         print(f"\n  ✅  El k actual ({current_k}) ya es el óptimo.")
@@ -459,22 +514,37 @@ def run_backtest(seasons: list[str]):
               f"{error_str:>8}  {b['n']:>5}{flag}")
 
     print(f"\n{'─'*60}")
-    print(f"  ROI SIMULADO  (asumiendo -110 para ambos lados)")
+    print(f"  ROI SIMULADO")
+    print(f"  Optimista = -110 plano | Realista = payout por prob. modelo (-5% vig)")
     print(f"{'─'*60}")
-    print(f"  {'Edge mín':>10}  {'Picks':>7}  {'Win%':>7}  {'ROI':>8}  {'Profit (u)':>12}")
-    print(f"  {'─'*10}  {'─'*7}  {'─'*7}  {'─'*8}  {'─'*12}")
+    print(f"  {'Edge mín':>10}  {'Picks':>6}  {'Win%':>6}  {'ROI opt':>8}  {'ROI real':>9}")
+    print(f"  {'─'*10}  {'─'*6}  {'─'*6}  {'─'*8}  {'─'*9}")
 
-    for label, r in [("≥ 4%", roi_4), ("≥ 6%", roi_6), ("≥ 8%", roi_8)]:
+    for label, r, rr in [(">=4%", roi_4, roi_4r), (">=6%", roi_6, roi_6r), (">=8%", roi_8, roi_8r)]:
         if r["picks_filtrados"] == 0:
-            print(f"  {label:>10}  {'—':>7}")
+            print(f"  {label:>10}  {'—':>6}")
             continue
-        roi_str  = f"{r['roi']:+.1%}"
-        prof_str = f"{r['profit_units']:+.2f}"
-        print(f"  {label:>10}  {r['picks_filtrados']:>7}  {r['win_rate']:>7.1%}"
-              f"  {roi_str:>8}  {prof_str:>12}")
+        print(f"  {label:>10}  {r['picks_filtrados']:>6}  {r['win_rate']:>6.1%}"
+              f"  {r['roi']:>+8.1%}  {rr['roi']:>+8.1%}")
+
+    print(f"\n  * Optimista: asume -110 en todos los partidos (cota superior).")
+    print(f"    Realista:   payout = (1-p)/p * 0.95 segun prob del modelo (cota inferior).")
+    print(f"    ROI real estara en el rango [Realista, Optimista].")
+
+    print(f"\n{'─'*60}")
+    print(f"  ACCURACY RS vs PLAYOFFS")
+    print(f"{'─'*60}")
+    if rs_acc is not None:
+        print(f"  Regular Season:  {rs_acc:.1%}  ({rs_n} partidos)")
+    if po_acc is not None:
+        print(f"  Playoffs:        {po_acc:.1%}  ({po_n} partidos)")
+    if rs_acc and po_acc:
+        diff = po_acc - rs_acc
+        note = "modelo mejora en playoffs" if diff > 0 else "modelo es mejor en RS"
+        print(f"  Diferencia PO-RS: {diff:+.1%}  ({note})")
 
     print(f"\n{'━'*60}")
-    print(f"  CONCLUSIÓN")
+    print(f"  CONCLUSION")
     print(f"{'━'*60}")
 
     if roi_4["roi"] > 0:
@@ -489,6 +559,93 @@ def run_backtest(seasons: list[str]):
             print(f"     Con edge ≥ {best_roi[1]} el ROI es positivo: {best_roi[0]['roi']:+.1%}")
 
     print(f"\n  k óptimo: {best_k}  |  Brier: {best_bs:.4f}  |  Accuracy: {accuracy:.1%}\n")
+
+    # ── Entrenar Regresión Logística ──────────────────────────────────────────
+    print(f"\n{'─'*60}")
+    print(f"  ENTRENAMIENTO — Regresión Logística")
+    print(f"{'─'*60}")
+
+    try:
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.preprocessing import StandardScaler
+
+        # Features: [net_diff_base, home_b2b, away_b2b, rest_tanh]
+        # net_diff_base excluye B2B y rest (LR aprende esos pesos)
+        X_train = []
+        y_train = []
+        for g in dataset:
+            rest_tanh = math.tanh((g["home_rest"] - g["away_rest"]) / 2)
+            net_base  = (g["home_pm"] + HOME_ADV) - g["away_pm"]
+            X_train.append([net_base, float(g["home_b2b"]), float(g["away_b2b"]), rest_tanh])
+            y_train.append(g["home_won"])
+
+        scaler   = StandardScaler()
+        X_scaled = scaler.fit_transform(X_train)
+
+        lr = LogisticRegression(C=1.0, max_iter=1000, random_state=42)
+        lr.fit(X_scaled, y_train)
+
+        coef      = lr.coef_[0].tolist()
+        intercept = float(lr.intercept_[0])
+        means     = scaler.mean_.tolist()
+        scales    = scaler.scale_.tolist()
+
+        # Evaluar LR vs sigmoid
+        lr_preds = []
+        for g, x in zip(dataset, X_train):
+            x_s = [(f - m) / s for f, m, s in zip(x, means, scales)]
+            z   = intercept + sum(c * xi for c, xi in zip(coef, x_s))
+            p   = max(0.05, min(0.93, 1 / (1 + math.exp(-z))))
+            lr_preds.append((p, g["home_won"], g["impl_prob"]))
+
+        lr_accuracy = sum(1 for p, o, _ in lr_preds if (p >= 0.5) == (o == 1)) / len(lr_preds)
+        lr_bs       = brier_score([(p, o) for p, o, _ in lr_preds])
+        lr_roi4  = simulated_roi(lr_preds, edge_min=0.04)
+        lr_roi4r = simulated_roi(lr_preds, edge_min=0.04, realistic=True)
+
+        print(f"  LR entrenada: {len(dataset)} partidos  ({', '.join(seasons)})")
+        print(f"  LR Accuracy:  {lr_accuracy:.1%}  (sigmoid: {accuracy:.1%})")
+        print(f"  LR Brier:     {lr_bs:.4f}  (sigmoid: {best_bs:.4f})")
+        print(f"  LR ROI@4%:    opt {lr_roi4['roi']:+.1%} | real {lr_roi4r['roi']:+.1%}"
+              f"  (sigmoid: opt {roi_4['roi']:+.1%} | real {roi_4r['roi']:+.1%})")
+        print(f"\n  Coeficientes (escala estandarizada):")
+        feat_names = ["net_diff_base", "home_b2b", "away_b2b", "rest_tanh"]
+        for name, c in zip(feat_names, coef):
+            print(f"    {name:<18}: {c:+.4f}")
+
+        # Guardar como model_lr.py (importable directamente por analyzer.py)
+        n_train = len(dataset)
+        model_code = f'''# Auto-generado por backtest.py — no editar manualmente
+# Entrenado sobre {n_train} partidos de {', '.join(seasons)}
+import math
+
+_COEF      = {coef}
+_INTERCEPT = {intercept}
+_MEANS     = {means}
+_SCALES    = {scales}
+
+
+def lr_prob(features: list) -> float:
+    """
+    Probabilidad de victoria del equipo local.
+    features = [net_diff_base, home_b2b (0.0/1.0), away_b2b (0.0/1.0), rest_tanh]
+    net_diff_base: diferencial de Net Rating sin ajustes B2B/rest
+    rest_tanh:     tanh((home_rest - away_rest) / 2)
+    """
+    scaled = [(f - m) / s for f, m, s in zip(features, _MEANS, _SCALES)]
+    z = _INTERCEPT + sum(c * x for c, x in zip(_COEF, scaled))
+    return max(0.05, min(0.93, 1 / (1 + math.exp(-z))))
+'''
+        with open("model_lr.py", "w", encoding="utf-8") as f:
+            f.write(model_code)
+
+        print(f"\n  Modelo guardado en: model_lr.py")
+        print(f"  analyzer.py usara LR automaticamente en el proximo python picks.py")
+
+    except ImportError:
+        print("  scikit-learn no instalado.")
+        print("  Ejecuta: pip install scikit-learn")
+        print("  El modelo sigmoid sigue siendo el activo.")
 
 
 # ─── MAIN ─────────────────────────────────────────────────────────────────────

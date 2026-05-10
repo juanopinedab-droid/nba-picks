@@ -41,12 +41,13 @@ def setup():
         # Migración: agregar columnas que pueden faltar en DBs existentes
         existing = {r[1] for r in conn.execute("PRAGMA table_info(picks)").fetchall()}
         for col, definition in [
-            ("stake_cop",     "REAL DEFAULT 0"),
-            ("profit_cop",    "REAL DEFAULT 0"),
-            ("sport",         "TEXT DEFAULT 'nba'"),
-            ("commence_time", "TEXT"),
-            ("closing_odds",  "INTEGER"),
-            ("clv",           "REAL"),
+            ("stake_cop",      "REAL DEFAULT 0"),
+            ("profit_cop",     "REAL DEFAULT 0"),
+            ("sport",          "TEXT DEFAULT 'nba'"),
+            ("commence_time",  "TEXT"),
+            ("closing_odds",   "INTEGER"),
+            ("clv",            "REAL"),
+            ("feedback_notes", "TEXT"),
         ]:
             if col not in existing:
                 conn.execute(f"ALTER TABLE picks ADD COLUMN {col} {definition}")
@@ -163,6 +164,32 @@ def get_pending():
             ORDER BY date DESC
         """).fetchall()
     return rows
+
+
+def get_resolved_without_feedback() -> list[dict]:
+    """Picks resueltos (WIN/LOSS/PUSH) sin feedback_notes, ordenados por fecha."""
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT id, date, game, bet_type, selection
+            FROM picks
+            WHERE result IN ('WIN', 'LOSS', 'PUSH')
+              AND (feedback_notes IS NULL OR feedback_notes = '')
+            ORDER BY date ASC
+        """).fetchall()
+    return [
+        {"id": r[0], "date": r[1], "game": r[2], "bet_type": r[3], "selection": r[4]}
+        for r in rows
+    ]
+
+
+def save_feedback(pick_id: int, notes: str):
+    """Guarda el contexto post-partido (noticias + líderes ESPN) de un pick."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE picks SET feedback_notes = ? WHERE id = ?",
+            (notes, pick_id)
+        )
+        conn.commit()
 
 
 def save_closing_odds(pick_id: int, closing_odds: int, clv: float):

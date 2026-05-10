@@ -1,6 +1,12 @@
 import math
 import config
 
+try:
+    from model_lr import lr_prob as _lr_prob
+    _USE_LR = True
+except ImportError:
+    _USE_LR = False
+
 # Varianza típica de cada stat en NBA (coeficiente de variación)
 # Cuanto más alta, más impredecible es la stat
 _STAT_CV = {
@@ -29,6 +35,10 @@ _DEF_SENSITIVITY = {"PTS": 0.8, "FG3M": 0.65, "REB": 0.25, "AST": 0.20}
 # Constantes para modelo de totales basado en pace
 _NBA_AVG_PACE   = 98.5   # Posesiones por 48 min, promedio liga 2024-25
 _TOTAL_STD      = 13.0   # Desviación estándar histórica de totales NBA (pts)
+
+# Ventaja por altitud: Denver (~1609m) reduce el rendimiento aeróbico de visitantes no aclimatados
+_ALTITUDE_BONUS = 1.5
+_ALTITUDE_TEAMS = {"Denver Nuggets"}
 
 
 def _normal_cdf(x: float, mean: float, std: float) -> float:
@@ -226,16 +236,20 @@ def net_rating_to_prob(net_rating_diff: float) -> float:
     Convierte diferencia de Net Rating en probabilidad de victoria.
     Usa función sigmoide centrada en 50%.
 
-    k = 0.08  →  calibrado con backtest sobre 2374 partidos (2023-24, 2024-25).
-    Minimiza Brier Score (0.2151) y corrige sobreconfianza del modelo anterior (k=0.8).
+    k = 0.08  →  calibrado con backtest sobre 2540 partidos (2023-24 + 2024-25 RS+PO).
+    Minimiza Brier Score (0.2162). Accuracy: 65.4%.
+
+    Clamp [0.05, 0.93]: el backtest muestra sobreconfianza por debajo del 20%
+    (predice 16.9% pero ganan solo 8.5%) y por encima del 90% (-4.8% error).
 
     Ejemplos con k=0.08:
       net_diff =  3  (solo ventaja local)    → 56%  win prob
-      net_diff =  6  (favorito claro)        → 65%
-      net_diff = 10  (gran favorito)         → 73%
+      net_diff =  6  (favorito claro)        → 62%
+      net_diff = 10  (gran favorito)         → 69%
     """
     k = 0.08  # Calibrado con backtest.py — NO cambiar sin re-ejecutar backtest
-    return 1 / (1 + math.exp(-k * net_rating_diff))
+    raw = 1 / (1 + math.exp(-k * net_rating_diff))
+    return max(0.05, min(0.93, raw))
 
 
 def analyze_game(game: dict, home_stats: dict, away_stats: dict,
@@ -286,9 +300,14 @@ def analyze_game(game: dict, home_stats: dict, away_stats: dict,
 
         if recent_nr is not None:
             blended = round(_W_SEASON * season_nr + _W_RECENT * recent_nr, 2)
+            # Momentum: equipo mejorando o cayendo más allá de lo que el blend 60/40 captura
+            trend        = recent_nr - season_nr
+            momentum_adj = round(math.tanh(trend / 6) * 0.8, 2)  # máx ±0.8 pts, suavizado
+            blended      = round(blended + momentum_adj, 2)
+            mom_str      = f" | momentum {momentum_adj:+.1f}" if abs(momentum_adj) >= 0.2 else ""
             note = (f"NRtg {label} [{split_label}]: {season_nr:+.1f} | "
                     f"global {global_nr:+.1f} | "
-                    f"últ.{n_games}j {recent_nr:+.1f} → blend {blended:+.1f}")
+                    f"últ.{n_games}j {recent_nr:+.1f} → blend {blended:+.1f}{mom_str}")
             return blended, note
         note = (f"NRtg {label} [{split_label}]: {season_nr:+.1f} "
                 f"(global {global_nr:+.1f})")
@@ -317,10 +336,81 @@ def analyze_game(game: dict, home_stats: dict, away_stats: dict,
             f"Descanso ({home_rest}d vs {away_rest}d): {rest_bonus:+.1f} pts"
         )
 
-    home_nr_adjusted = home_nr + adjustments_home
-    net_diff = home_nr_adjusted - away_nr
+    # Altitud: Denver Nuggets tienen ventaja sobre visitantes no aclimatados
+    if game["home_team"] in _ALTITUDE_TEAMS:
+        adjustments_home += _ALTITUDE_BONUS
+        reasons.append(f"Altitud (Denver): +{_ALTITUDE_BONUS:.1f} pts")
 
-    our_prob_home = net_rating_to_prob(net_diff)
+    # Travel fatigue: 3+ partidos seguidos de visita → acumulación de fatiga por viajes
+    home_travel = home_stats.get("travel_fatigue", 0)
+    away_travel = away_stats.get("travel_fatigue", 0)
+    if home_travel >= 3:
+        travel_pen = -round((home_travel - 2) * 0.5, 1)
+        adjustments_home += travel_pen
+        reasons.append(f"Travel fatigue LOCAL ({home_travel} visitas seguidas): {travel_pen:+.1f} pts")
+    if away_travel >= 3:
+        travel_bon = round((away_travel - 2) * 0.5, 1)
+        adjustments_home += travel_bon
+        reasons.append(f"Travel fatigue VISITANTE ({away_travel} visitas seguidas): +{travel_bon:.1f} pts")
+
+    # H2H histórico: matchups consistentemente desequilibrados
+    h2h_edge = home_stats.get("h2h_edge", 0.0)
+    if abs(h2h_edge) >= 0.5:
+        adjustments_home += h2h_edge
+        reasons.append(f"H2H histórico: {h2h_edge:+.1f} pts")
+
+    home_nr_adjusted = home_nr + adjustments_home
+
+    # Diferencial base con splits home/away de Net Rating
+    nr_diff = home_nr_adjusted - away_nr
+
+    # Blend 70/30 con matchup OffRtg/DefRtg: cómo le va al ataque de cada equipo vs la defensa rival
+    h_off = home_stats.get("off_rating")
+    h_def = home_stats.get("def_rating")
+    a_off = away_stats.get("off_rating")
+    a_def = away_stats.get("def_rating")
+
+    if all(v is not None for v in [h_off, h_def, a_off, a_def]):
+        matchup_diff = ((h_off + a_def) - (a_off + h_def)) / 2 + adjustments_home
+        net_diff     = round(0.70 * nr_diff + 0.30 * matchup_diff, 2)
+        reasons.append(
+            f"Blend NR/matchup: NR={nr_diff:+.1f} | matchup={matchup_diff:+.1f} → diff={net_diff:+.1f}"
+        )
+    else:
+        net_diff = nr_diff
+
+    # Probabilidad: LR (si está entrenado) o sigmoid calibrado
+    if _USE_LR:
+        # Separar ajustes manuales (altitud, H2H, travel) de B2B/rest (features de LR)
+        adj_b2b = (-config.B2B_PENALTY_POINTS if home_b2b else 0) + (config.B2B_PENALTY_POINTS if away_b2b else 0)
+        adj_rest = math.tanh((home_rest - away_rest) / 2) * 1.5 if abs(math.tanh((home_rest - away_rest) / 2) * 1.5) >= 0.5 else 0
+        adj_for_lr = adjustments_home - adj_b2b - adj_rest
+
+        if all(v is not None for v in [h_off, h_def, a_off, a_def]):
+            matchup_lr = ((h_off + a_def) - (a_off + h_def)) / 2 + adj_for_lr
+            net_base   = round(0.70 * (home_nr + adj_for_lr - away_nr) + 0.30 * matchup_lr, 2)
+        else:
+            net_base = home_nr + adj_for_lr - away_nr
+
+        rest_feat = math.tanh((home_rest - away_rest) / 2)
+        our_prob_home = _lr_prob([net_base, float(home_b2b), float(away_b2b), rest_feat])
+        reasons.append(f"Prob (LR): {our_prob_home:.1%}  [net_base={net_base:+.2f}]")
+    else:
+        our_prob_home = net_rating_to_prob(net_diff)
+
+    # Playoff dampening: en playoffs los equipos se ajustan al oponente específico
+    # (series scouting, rotaciones específicas) → Net Rating es menos predictivo
+    # Backtest: accuracy RS=65.8% vs Playoffs=60.8% → regresión del 12% a la media
+    home_po_gp = home_stats.get("playoff_gp", 0)
+    away_po_gp = away_stats.get("playoff_gp", 0)
+    if home_po_gp >= 3 and away_po_gp >= 3:
+        raw_prob = our_prob_home
+        our_prob_home = max(0.05, min(0.93, 0.5 + (raw_prob - 0.5) * 0.88))
+        reasons.append(
+            f"Ajuste playoffs: prob {raw_prob:.1%} → {our_prob_home:.1%}  "
+            f"(PO games: {home_po_gp} vs {away_po_gp})"
+        )
+
     our_prob_away = 1 - our_prob_home
 
     # --- Probabilidades implícitas sin vig ---
@@ -355,9 +445,10 @@ def analyze_game(game: dict, home_stats: dict, away_stats: dict,
     agree_home, agree_home_str = _book_agreement(our_prob_home, books_home)
     agree_away, agree_away_str = _book_agreement(our_prob_away, books_away)
 
-    # Filtro de movimiento: descartar si menos de la mitad de casas confirman el edge
-    home_ok = n_total < 2 or agree_home >= max(1, n_total // 2)
-    away_ok  = n_total < 2 or agree_away >= max(1, n_total // 2)
+    # Filtro de movimiento: al menos 60% de las casas deben confirmar el edge
+    threshold = max(1, math.ceil(n_total * 0.60))
+    home_ok   = n_total < 2 or agree_home >= threshold
+    away_ok   = n_total < 2 or agree_away >= threshold
 
     if edge_home >= config.MIN_EDGE and our_prob_home >= 0.52 and home_ok:
         picks.append(_build_pick(
@@ -428,7 +519,7 @@ def _analyze_spread(game: dict, net_diff: float,
     Regla: Net Rating diff / 2 ≈ spread esperado.
     """
     market_spread = game["spread_home_pts"]  # Negativo = favorito local
-    our_spread    = -net_diff / 2            # Negativo = predecimos que home gana por eso
+    our_spread    = -net_diff / 2.5          # 2.5 más preciso históricamente en NBA (spread ≈ NR/2.5)
 
     spread_diff = our_spread - market_spread
 

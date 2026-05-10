@@ -24,6 +24,8 @@ from datetime import datetime, date, timedelta
 
 import database
 import config
+import feedback as _feedback
+from utils import http_get
 
 # ─── ENDPOINTS ESPN ───────────────────────────────────────────────────────────
 
@@ -43,8 +45,7 @@ def fetch_nba_scores(target_date: date) -> list[dict]:
     """
     date_str = target_date.strftime("%Y%m%d")
     try:
-        r = requests.get(_ESPN_SCOREBOARD, params={"dates": date_str}, timeout=15)
-        r.raise_for_status()
+        r = http_get(_ESPN_SCOREBOARD, params={"dates": date_str}, timeout=15)
         data = r.json()
     except Exception as e:
         print(f"  ⚠️  ESPN scoreboard error ({date_str}): {e}")
@@ -88,8 +89,7 @@ def fetch_player_stats(espn_id: str) -> dict[str, dict]:
     Retorna {nombre_lower: {PTS, REB, AST, FG3M}}.
     """
     try:
-        r = requests.get(_ESPN_SUMMARY, params={"event": espn_id}, timeout=15)
-        r.raise_for_status()
+        r = http_get(_ESPN_SUMMARY, params={"event": espn_id}, timeout=15)
         data = r.json()
     except Exception as e:
         print(f"  ⚠️  ESPN summary error ({espn_id}): {e}")
@@ -331,6 +331,7 @@ def auto_resolve_all(target_date: date | None = None) -> dict:
 
         final_scores = [s for s in scores if s["final"]]
         boxscore_cache: dict[str, dict] = {}  # espn_id → player_stats
+        feedback_queue: dict[str, dict] = {}  # espn_id → {pick_ids, home_team, away_team}
 
         for pick in date_picks:
             pick_id   = pick["id"]
@@ -376,9 +377,31 @@ def auto_resolve_all(target_date: date | None = None) -> dict:
                 print(f"  {icon}  [{pick_id}] {selection}  →  {result}")
                 print(f"       {score_str}")
                 summary[result] += 1
+
+                # Acumular para feedback post-fecha
+                eid = game_result["espn_id"]
+                if eid not in feedback_queue:
+                    feedback_queue[eid] = {
+                        "pick_ids":  [],
+                        "home_team": game_result["home_team"],
+                        "away_team": game_result["away_team"],
+                    }
+                feedback_queue[eid]["pick_ids"].append(pick_id)
             else:
                 print(f"  ❓  [{pick_id}] No se pudo resolver: {selection}")
                 summary["ERROR"] += 1
+
+        # ── Feedback automático por partido ────────────────────────────────────
+        if feedback_queue:
+            print(f"\n  🗞️   Obteniendo contexto ESPN para {len(feedback_queue)} partido(s)...")
+            for eid, info in feedback_queue.items():
+                time.sleep(0.5)
+                _feedback.attach_feedback(
+                    eid,
+                    info["pick_ids"],
+                    info["home_team"],
+                    info["away_team"],
+                )
 
     return summary
 
@@ -420,8 +443,7 @@ def _fetch_current_nba_odds() -> list[dict]:
         "dateFormat": "iso",
     }
     try:
-        r = requests.get(url, params=params, timeout=15)
-        r.raise_for_status()
+        r = http_get(url, params=params, timeout=15)
         remaining = r.headers.get("x-requests-remaining", "?")
         print(f"  [API] Requests restantes: {remaining}")
         return r.json()
@@ -602,7 +624,18 @@ def main():
         "--fecha", metavar="YYYY-MM-DD",
         help="Resolver solo picks de esta fecha (default: todos los pendientes)"
     )
+    parser.add_argument(
+        "--backfill-feedback", action="store_true",
+        help="Aplicar feedback ESPN a todos los picks resueltos que aún no lo tienen"
+    )
     args = parser.parse_args()
+
+    if args.backfill_feedback:
+        print(f"\n{BOLD}{'━'*50}{RESET}")
+        print(f"{BOLD}  🗞️   BACKFILL FEEDBACK — Picks históricos{RESET}")
+        print(f"{BOLD}{'━'*50}{RESET}\n")
+        _feedback.backfill_feedback_all()
+        return
 
     target = None
     if args.fecha:

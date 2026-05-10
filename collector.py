@@ -6,6 +6,7 @@ from nba_api.stats.static import teams as nba_teams_static
 from nba_api.stats.static import players as nba_players_static
 
 import config
+from utils import http_get
 
 # Cache en memoria para no repetir llamadas a nba_api en la misma sesión
 _regular_team_cache:      dict = {}
@@ -141,13 +142,14 @@ def _fetch_player_stats_for_season_type(season_type: str) -> dict:
         if not name:
             continue
         result[name] = {
-            "PTS":        float(row.get("PTS",  0)),
-            "REB":        float(row.get("REB",  0)),
-            "AST":        float(row.get("AST",  0)),
-            "FG3M":       float(row.get("FG3M", 0)),
-            "GP":         int(row.get("GP",  0)),
-            "MIN":        float(row.get("MIN", 0)),
-            "TEAM_ABBR":  str(row.get("TEAM_ABBREVIATION", "")),
+            "PTS":         float(row.get("PTS",         0)),
+            "REB":         float(row.get("REB",         0)),
+            "AST":         float(row.get("AST",         0)),
+            "FG3M":        float(row.get("FG3M",        0)),
+            "GP":          int(row.get("GP",            0)),
+            "MIN":         float(row.get("MIN",         0)),
+            "PLUS_MINUS":  float(row.get("PLUS_MINUS",  0)),
+            "TEAM_ABBR":   str(row.get("TEAM_ABBREVIATION", "")),
         }
 
     return result
@@ -165,8 +167,7 @@ def get_todays_odds() -> list[dict]:
         "dateFormat": "iso",
     }
 
-    resp = requests.get(url, params=params, timeout=15)
-    resp.raise_for_status()
+    resp = http_get(url, params=params, timeout=15)
 
     remaining = resp.headers.get("x-requests-remaining", "?")
     print(f"  [API] Requests restantes este mes: {remaining}")
@@ -482,6 +483,48 @@ def get_rest_days(team_name: str) -> int:
         return 2
 
 
+def get_consecutive_away_games(team_name: str) -> int:
+    """
+    Consecutive away games the team has played before today's game.
+    Reuses the gamelog cached by is_back_to_back() — no extra API calls.
+    Signal: 3+ consecutive road games indicate cumulative travel fatigue.
+    """
+    abbr = config.TEAM_MAP.get(team_name)
+    if not abbr or abbr not in _gamelog_cache:
+        return 0
+    df = _gamelog_cache[abbr]
+    if df.empty or "MATCHUP" not in df.columns:
+        return 0
+    count = 0
+    for _, row in df.iterrows():
+        if "@" in str(row.get("MATCHUP", "")):
+            count += 1
+        else:
+            break
+    return count
+
+
+def get_h2h_edge(home_team: str, away_team: str, n: int = 10) -> float:
+    """
+    Historical edge of home_team vs away_team in direct matchups (last n meetings).
+    Reuses the gamelog cached by is_back_to_back() — no extra API calls.
+    Returns Net Rating adjustment: +2.0 (home dominates) to -2.0 (home always loses).
+    Returns 0.0 if fewer than 3 H2H games are available.
+    """
+    home_abbr = config.TEAM_MAP.get(home_team, "")
+    away_abbr = config.TEAM_MAP.get(away_team, "")
+    if not home_abbr or not away_abbr or home_abbr not in _gamelog_cache:
+        return 0.0
+    df = _gamelog_cache[home_abbr]
+    if df.empty or "MATCHUP" not in df.columns or "WL" not in df.columns:
+        return 0.0
+    h2h = df[df["MATCHUP"].str.contains(away_abbr, na=False)].head(n)
+    if len(h2h) < 3:
+        return 0.0
+    win_rate = h2h["WL"].eq("W").sum() / len(h2h)
+    return round((win_rate - 0.5) * 4.0, 2)  # max ±2.0 pts
+
+
 def get_team_recent_form(team_name: str, n: int = 5) -> dict | None:
     """
     Promedio de PLUS_MINUS de los últimos n partidos del equipo.
@@ -566,8 +609,7 @@ def get_injury_report() -> dict:
     """
     url = "http://site.api.espn.com/apis/site/v2/sports/basketball/nba/injuries"
     try:
-        resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
+        resp = http_get(url, timeout=10)
         data = resp.json()
     except Exception:
         return {}
@@ -594,9 +636,13 @@ def get_injury_report() -> dict:
 def get_team_injury_impact(team_name: str, injury_report: dict, player_stats: dict) -> dict:
     """
     Estima el ajuste de Net Rating por lesiones de un equipo.
-    Fórmula: impacto ≈ PTS_promedio / 10 (cada 10 PPG ≈ 1 punto de NRtg).
-    OUT/Doubtful = impacto completo. Questionable = 50%.
-    Retorna {"adjustment": float, "out": [str], "questionable": [str]}
+
+    Fórmula: impacto = (PTS * 0.4 + max(PLUS_MINUS, 0) * 1.5) / 10
+    - PTS captura el volumen ofensivo
+    - PLUS_MINUS captura el impacto total (defensa, playmaking, espaciado)
+    - Solo suma PM positivo: un jugador con PM negativo no "ayuda" al ausentarse
+    - Cap de 3.5 NRtg por jugador (incluso una estrella raramente vale más)
+    - OUT/Doubtful = 100% del impacto | Questionable = 40% (suelen jugar)
     """
     abbr = config.TEAM_MAP.get(team_name, "")
     out_list: list[str] = []
@@ -607,20 +653,22 @@ def get_team_injury_impact(team_name: str, injury_report: dict, player_stats: di
         if info["team_abbr"] != abbr:
             continue
 
-        pts = 0.0
+        pts = pm = 0.0
         for pname, pstats in player_stats.items():
             if pname.lower() == name_lower:
-                pts = pstats.get("PTS", 0.0)
+                pts = pstats.get("PTS",        0.0)
+                pm  = pstats.get("PLUS_MINUS", 0.0)
                 break
 
-        impact = pts / 10  # ~1 NRtg point por cada 10 PPG
+        pm_contribution = max(pm, 0) * 1.5          # solo PM positivo cuenta
+        impact = min((pts * 0.4 + pm_contribution) / 10, 3.5)
 
         if info["status"] in ("Out", "Doubtful"):
             out_list.append(info["display_name"])
             total_adj -= impact
         elif info["status"] == "Questionable":
             questionable_list.append(info["display_name"])
-            total_adj -= impact * 0.5
+            total_adj -= impact * 0.40  # questionable suele jugar → impacto reducido
 
     return {
         "adjustment":   round(total_adj, 2),
@@ -639,8 +687,7 @@ def get_player_props(event_id: str) -> list[dict]:
     }
 
     try:
-        resp = requests.get(url, params=params, timeout=15)
-        resp.raise_for_status()
+        resp = http_get(url, params=params, timeout=15)
     except Exception as e:
         print(f"  ⚠️  Props no disponibles: {e}")
         return []
