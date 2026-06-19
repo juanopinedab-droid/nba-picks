@@ -50,8 +50,10 @@ def _game_date(game: dict) -> date:
         return date.today()
 
 
-def _kelly_stake(prob: float, odds: int) -> float:
-    """Half Kelly fraction (capped at 5%)."""
+_CONF_MULT = {"ALTA": 1.00, "MEDIA": 0.75, "BAJA": 0.50}
+
+def _kelly_stake(prob: float, odds: int, confianza: str = "ALTA") -> float:
+    """Kelly completo × multiplicador de confianza, capado al 10%."""
     if odds > 0:
         dec = odds / 100.0 + 1.0
     else:
@@ -60,8 +62,8 @@ def _kelly_stake(prob: float, odds: int) -> float:
     if b <= 0:
         return 0.0
     kelly = (prob * dec - 1.0) / b
-    half_kelly = kelly / 2.0
-    return max(0.0, min(half_kelly, 0.05))
+    mult = _CONF_MULT.get(confianza, 0.75)
+    return max(0.0, min(kelly * mult, 0.10))
 
 
 def _pick_to_db_format(pick: dict) -> dict:
@@ -601,6 +603,10 @@ def run_mlb_picks(partido: Optional[str] = None, solo_manana: bool = False,
         [p for g in games for p in analyzer_mlb.analyze_tb_props(g, paper=paper)],
         key=lambda p: p["edge"], reverse=True
     )[:analyzer_mlb._MAX_TB_PROPS]
+    tt_picks = sorted(
+        [p for g in games for p in analyzer_mlb.analyze_team_totals(g, paper=paper)],
+        key=lambda p: p["edge"], reverse=True
+    )
 
     if paper:
         analyzer_mlb._MAX_TOTAL_LINE     = _orig_max_line
@@ -695,6 +701,10 @@ def run_mlb_picks(partido: Optional[str] = None, solo_manana: bool = False,
             _f5_filtered.append(_f5p)
     f5_picks = _f5_filtered
 
+    # F5 BAJA fuera del reporte apostable — solo ALTA y MEDIA tienen nicho demostrado
+    f5_baja = [p for p in f5_picks if p.get("confianza") == "BAJA"]
+    f5_picks = [p for p in f5_picks if p.get("confianza") != "BAJA"]
+
     if f5_picks:
         print()
         print(_SEP)
@@ -707,8 +717,13 @@ def run_mlb_picks(partido: Optional[str] = None, solo_manana: bool = False,
         for f5p in f5_picks:
             db_p = _pick_to_db_format(f5p)
             db_p["member"] = "base"
-            stake = 0 if paper else int(_kelly_stake(f5p["our_prob"], int(f5p.get("odds", -110) or -110)) * bankroll_val)
+            stake = 0 if paper else int(_kelly_stake(f5p["our_prob"], int(f5p.get("odds", -110) or -110), f5p.get("confianza", "ALTA")) * bankroll_val)
             database.save_pick(db_p, stake_cop=stake)
+
+    if f5_baja:
+        for _b in f5_baja:
+            print(f"  ⏭ F5 BAJA ignorado — {_b.get('away_team')} @ {_b.get('home_team')} "
+                  f"{_b.get('direction')} {_b.get('line')} (edge {_b.get('edge', 0):.1%}) — solo apostamos ALTA/MEDIA")
     else:
         print(f"\n  ℹ️  Sin picks F5 con edge suficiente hoy.")
 
@@ -726,7 +741,7 @@ def run_mlb_picks(partido: Optional[str] = None, solo_manana: bool = False,
         for mlp in ml_picks:
             db_p = _pick_to_db_format(mlp)
             db_p["member"] = "base"
-            stake = 0 if paper else int(_kelly_stake(mlp["our_prob"], int(mlp.get("odds", -110) or -110)) * bankroll_val)
+            stake = 0 if paper else int(_kelly_stake(mlp["our_prob"], int(mlp.get("odds", -110) or -110), mlp.get("confianza", "ALTA")) * bankroll_val)
             database.save_pick(db_p, stake_cop=stake)
     else:
         print(f"\n  ℹ️  Sin picks Moneyline con edge suficiente hoy.")
@@ -745,7 +760,7 @@ def run_mlb_picks(partido: Optional[str] = None, solo_manana: bool = False,
         for rlp in rl_picks:
             db_p = _pick_to_db_format(rlp)
             db_p["member"] = "base"
-            stake = 0 if paper else int(_kelly_stake(rlp["our_prob"], int(rlp.get("odds", -110) or -110)) * bankroll_val)
+            stake = 0 if paper else int(_kelly_stake(rlp["our_prob"], int(rlp.get("odds", -110) or -110), rlp.get("confianza", "ALTA")) * bankroll_val)
             database.save_pick(db_p, stake_cop=stake)
     else:
         print(f"\n  ℹ️  Sin picks Run Line con edge suficiente hoy.")
@@ -754,12 +769,15 @@ def run_mlb_picks(partido: Optional[str] = None, solo_manana: bool = False,
     if k_picks:
         print()
         print(_SEP)
-        label = "🧪 K-PROPS PAPER" if paper else "⚾  PITCHER PROPS"
+        # K-props en modo seguimiento: se muestran pero NO se apuestan.
+        # Historial: 24W-35L (41% WR), UNDERs 0W-7L — modelo sin ventaja validada.
+        # Se mantienen para calibración hasta demostrar edge real con ≥50 picks limpios.
+        label = "🧪 K-PROPS PAPER" if paper else "📊 K-PROPS SEGUIMIENTO (no apostar)"
         print(f"  {BOLD}{label} — Strikeouts{RESET}")
         print(_SEP)
         for idx, kp in enumerate(k_picks, 1):
             _display_k_prop_pick(kp, idx)
-        bankroll_val = database.get_current_bankroll(config.BANKROLL)
+        # Guardar en DB solo para seguimiento (stake=0, context_flag tracking_only)
         for kp in k_picks:
             db_p = {
                 "sport":        _SPORT,
@@ -773,31 +791,29 @@ def run_mlb_picks(partido: Optional[str] = None, solo_manana: bool = False,
                 "confidence":   kp["confianza"],
                 "commence_time": kp.get("commence_iso", ""),
                 "context_flags": json.dumps({
-                    "game_pk":    kp.get("game_pk"),
-                    "pitcher":    kp["pitcher"], "lambda": kp["lambda"],
-                    "team":       kp.get("pitcher_team"),
-                    "hp_umpire":  kp.get("hp_umpire"),
-                    "k9_blended": kp["k9_blended"], "ip_per_start": kp["ip_per_start"],
-                    "opp_k_pct":  kp["opp_k_pct"],
-                    "paper":      paper,
+                    "game_pk":      kp.get("game_pk"),
+                    "pitcher":      kp["pitcher"], "lambda": kp["lambda"],
+                    "team":         kp.get("pitcher_team"),
+                    "hp_umpire":    kp.get("hp_umpire"),
+                    "k9_blended":   kp["k9_blended"], "ip_per_start": kp["ip_per_start"],
+                    "opp_k_pct":    kp["opp_k_pct"],
+                    "paper":        paper,
+                    "tracking_only": True,
                 }),
             }
-            stake = 0 if paper else int(_kelly_stake(kp["our_prob"], int(kp.get("odds", -115) or -115)) * bankroll_val)
             db_p["member"] = "base"
-            database.save_pick(db_p, stake_cop=stake)
+            database.save_pick(db_p, stake_cop=0)
     else:
         print(f"\n  ℹ️  Sin props de strikeouts con edge suficiente hoy.")
 
-    # 12. Batter Total Bases Props
+    # 12. Batter Total Bases Props — tracking only (modelo genérico sin nicho demostrado)
     if tb_picks:
         print()
         print(_SEP)
-        label = "🧪 TB PAPER" if paper else "⚾  BATTER PROPS"
-        print(f"  {BOLD}{label} — Total Bases{RESET}")
+        print(f"  {BOLD}📊 TB PROPS SEGUIMIENTO (no apostar) — Total Bases{RESET}")
         print(_SEP)
         for idx, tp in enumerate(tb_picks, 1):
             _display_tb_prop_pick(tp, idx)
-        bankroll_val = database.get_current_bankroll(config.BANKROLL)
         for tp in tb_picks:
             db_p = {
                 "sport":        _SPORT,
@@ -820,13 +836,31 @@ def run_mlb_picks(partido: Optional[str] = None, solo_manana: bool = False,
                     "pit_factor":   tp["pit_factor"],
                     "park_factor":  tp["park_factor"],
                     "paper":        paper,
+                    "tracking_only": True,
                 }),
             }
-            stake = 0 if paper else int(_kelly_stake(tp["our_prob"], int(tp.get("odds", -115) or -115)) * bankroll_val)
             db_p["member"] = "base"
-            database.save_pick(db_p, stake_cop=stake)
-    else:
-        print(f"\n  ℹ️  Sin props de Total Bases con edge suficiente hoy.")
+            database.save_pick(db_p, stake_cop=0)  # siempre tracking, stake=0
+
+    # 12b. Team Run Totals — tracking only
+    if tt_picks:
+        print(f"\n{_SEP}")
+        print(f"  \033[1m📊 TEAM RUN TOTALS SEGUIMIENTO (no apostar) — Carreras por equipo\033[0m")
+        print(_SEP)
+        for idx, tt in enumerate(tt_picks, 1):
+            conf_icon = {"ALTA": "🔥", "MEDIA": "✅", "BAJA": "🔸"}.get(tt["confianza"], "•")
+            print(f"\n  {conf_icon} \033[1mTEAM TOTAL #{idx}\033[0m")
+            print(f"     {tt['away_team']}  @  {tt['home_team']}")
+            print(f"     ► {tt['direction']} {tt['line']} carreras — {tt['team']}  ({tt['odds']:+d})")
+            print(f"     Confianza:   {tt['confianza']}")
+            print(f"     Edge:        {tt['edge']:.1%}  (nuestra {tt['our_prob']:.1%} vs mercado {tt['fair_prob']:.1%})")
+            print(f"     Exp. runs:   {tt['exp_runs']:.1f}  vs línea {tt['line']}")
+            print(f"     Pitcher opp: {tt['opp_pitcher']}")
+            print(f"     Hora:        {tt.get('game_time','?')}")
+            print(_SEP2)
+            db_p = _pick_to_db_format(tt)
+            db_p["member"] = "base"
+            database.save_pick(db_p, stake_cop=0)  # siempre tracking, stake=0
 
     # 13. Footer
     with database.get_conn() as _conn:

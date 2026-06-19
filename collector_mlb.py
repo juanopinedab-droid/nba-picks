@@ -337,8 +337,17 @@ def get_mlb_schedule(target_date: date | None = None) -> list[dict]:
                 "away_lineup_pct_l":  away_lineup_pct_l,
             })
 
-    cache[cache_key] = result
-    _save_daily_cache(cache)
+    # No cachear si algún juego próximo (< 3h) tiene lineups vacíos — se re-fetching al correr de nuevo
+    now_utc = datetime.now(timezone.utc)
+    has_upcoming_empty = any(
+        (not g["home_lineup_ids"] or not g["away_lineup_ids"])
+        and g.get("commence_iso")
+        and (datetime.fromisoformat(g["commence_iso"].replace("Z", "+00:00")) - now_utc).total_seconds() < 10800
+        for g in result
+    )
+    if not has_upcoming_empty:
+        cache[cache_key] = result
+        _save_daily_cache(cache)
     return result
 
 
@@ -1298,7 +1307,8 @@ def get_pitcher_strikeout_props(game_ids: list[str]) -> dict[str, dict]:
     """
     cache     = _load_daily_cache()
     result: dict[str, dict] = {}
-    to_fetch  = [gid for gid in game_ids if f"k_props_{gid}" not in cache]
+    to_fetch  = [gid for gid in game_ids
+                 if f"k_props_{gid}" not in cache or f"team_totals_{gid}" not in cache]
 
     for gid in to_fetch:
         url = f"https://api.the-odds-api.com/v4/sports/baseball_mlb/events/{gid}/odds"
@@ -1306,34 +1316,47 @@ def get_pitcher_strikeout_props(game_ids: list[str]) -> dict[str, dict]:
             r = requests.get(url, params={
                 "apiKey":     config.ODDS_API_KEY,
                 "regions":    "us",
-                "markets":    "pitcher_strikeouts",
+                "markets":    "pitcher_strikeouts,team_totals",
                 "oddsFormat": "american",
             }, timeout=15)
             r.raise_for_status()
             data = r.json()
         except Exception as e:
             print(f"  ⚠️  K props {gid[:8]}: {e}")
-            cache[f"k_props_{gid}"] = {}
+            cache[f"k_props_{gid}"]    = {}
+            cache[f"team_totals_{gid}"] = {}
             continue
 
         pitchers: dict[str, dict] = {}
+        teams: dict[str, dict]    = {}
         for bk in data.get("bookmakers", []):
             for mkt in bk.get("markets", []):
-                if mkt["key"] != "pitcher_strikeouts":
-                    continue
-                for outcome in mkt.get("outcomes", []):
-                    name = outcome.get("description", "")
-                    if not name:
-                        continue
-                    if name not in pitchers:
-                        pitchers[name] = {"line": outcome.get("point")}
-                    if outcome["name"].lower() == "over":
-                        pitchers[name]["over_odds"] = outcome.get("price")
-                    else:
-                        pitchers[name]["under_odds"] = outcome.get("price")
-                break  # primer bookmaker es suficiente
+                if mkt["key"] == "pitcher_strikeouts" and not pitchers:
+                    for outcome in mkt.get("outcomes", []):
+                        name = outcome.get("description", "")
+                        if not name:
+                            continue
+                        if name not in pitchers:
+                            pitchers[name] = {"line": outcome.get("point")}
+                        if outcome["name"].lower() == "over":
+                            pitchers[name]["over_odds"] = outcome.get("price")
+                        else:
+                            pitchers[name]["under_odds"] = outcome.get("price")
 
-        cache[f"k_props_{gid}"] = pitchers
+                elif mkt["key"] == "team_totals" and not teams:
+                    for outcome in mkt.get("outcomes", []):
+                        team = outcome.get("description", "")
+                        if not team:
+                            continue
+                        if team not in teams:
+                            teams[team] = {"line": outcome.get("point")}
+                        if outcome["name"].lower() == "over":
+                            teams[team]["over_odds"] = outcome.get("price")
+                        else:
+                            teams[team]["under_odds"] = outcome.get("price")
+
+        cache[f"k_props_{gid}"]    = pitchers
+        cache[f"team_totals_{gid}"] = teams
 
     _save_daily_cache(cache)
 
@@ -1342,6 +1365,20 @@ def get_pitcher_strikeout_props(game_ids: list[str]) -> dict[str, dict]:
         if ck in cache:
             result[gid] = cache[ck]
 
+    return result
+
+
+def get_team_total_odds(game_ids: list[str]) -> dict[str, dict]:
+    """
+    Cuotas de totales por equipo desde cache (populado junto con K-props).
+    Retorna: {game_id: {team_name: {"line": float, "over_odds": int, "under_odds": int}}}
+    """
+    cache  = _load_daily_cache()
+    result = {}
+    for gid in game_ids:
+        ck = f"team_totals_{gid}"
+        if ck in cache:
+            result[gid] = cache[ck]
     return result
 
 
@@ -2422,8 +2459,10 @@ def get_lineup_ops(
     Returns:
         (ops_value, lineup_was_used, player_names_with_data)
     """
+    _WEAK_OPS_FLOOR = 0.650  # bateador "hueco" en el lineup
+
     if not lineup_ids:
-        return team_fallback_ops, False, []
+        return team_fallback_ops, False, [], 0
 
     player_stats = get_batch_player_hitting_stats(lineup_ids)
 
@@ -2435,14 +2474,15 @@ def get_lineup_ops(
     ]
 
     if len(valid) < min_batters:
-        return team_fallback_ops, False, []
+        return team_fallback_ops, False, [], 0
 
     # OPS ponderado por PA (más PA = más peso)
     total_pa      = sum(s["pa"] for _, s in valid)
     weighted_ops  = sum(s["ops"] * s["pa"] for _, s in valid) / total_pa
     player_names  = [s.get("name", "?") for _, s in valid[:5]]  # top 5 para display
+    weak_count    = sum(1 for _, s in valid if s.get("ops", 1.0) < _WEAK_OPS_FLOOR)
 
-    return round(weighted_ops, 3), True, player_names
+    return round(weighted_ops, 3), True, player_names, weak_count
 
 
 def get_lineup_k_pct(
@@ -3032,17 +3072,21 @@ def get_todays_mlb_games() -> list[dict]:
         # Solo se activa si ≥ 7 de los 9 bateadores tienen ≥ 30 PA esta temporada.
         (home_ops_final,
          home_lineup_used,
-         home_lineup_names) = get_lineup_ops(home_lineup_ids, home_ops_blended)
+         home_lineup_names,
+         home_lineup_weak) = get_lineup_ops(home_lineup_ids, home_ops_blended)
         (away_ops_final,
          away_lineup_used,
-         away_lineup_names) = get_lineup_ops(away_lineup_ids, away_ops_blended)
+         away_lineup_names,
+         away_lineup_weak) = get_lineup_ops(away_lineup_ids, away_ops_blended)
 
         if home_lineup_used:
+            weak_note = f"  ⚠️ {home_lineup_weak} hueco(s)" if home_lineup_weak >= 2 else ""
             print(f"    [LINEUP] {home}: OPS={home_ops_final:.3f} "
-                  f"(vs blended {home_ops_blended:.3f})")
+                  f"(vs blended {home_ops_blended:.3f}){weak_note}")
         if away_lineup_used:
+            weak_note = f"  ⚠️ {away_lineup_weak} hueco(s)" if away_lineup_weak >= 2 else ""
             print(f"    [LINEUP] {away}: OPS={away_ops_final:.3f} "
-                  f"(vs blended {away_ops_blended:.3f})")
+                  f"(vs blended {away_ops_blended:.3f}){weak_note}")
 
         # Fracción zurda del lineup — lee del cache de bat_side populado por get_lineup_ops.
         # Si el lineup no está disponible aún, hace un batch call mínimo para obtener batSide.
@@ -3201,6 +3245,9 @@ def get_todays_mlb_games() -> list[dict]:
             # Composición: bateadores high-K (K/AB ≥ 28%) en el lineup confirmado
             "home_lineup_high_k": home_lineup_high_k,
             "away_lineup_high_k": away_lineup_high_k,
+            # Bateadores "huecos" (OPS < 0.650) en el lineup — filtra OVERs con lineup inflado
+            "home_lineup_weak":   home_lineup_weak,
+            "away_lineup_weak":   away_lineup_weak,
             # Props de strikeouts — poblado después del loop por get_pitcher_strikeout_props()
             "away_k_prop":     None,
             "home_k_prop":     None,
@@ -3282,18 +3329,25 @@ def get_todays_mlb_games() -> list[dict]:
     if n_tb:
         print(f"  [PROPS] TB props disponibles para {n_tb} partido(s) (home lineup)")
 
-    # ── Pitcher strikeout props (un request por partido, cache diaria) ───────────
+    # ── Pitcher strikeout props + team totals (mismo request, cache diaria) ─────
     game_ids = [g["game_id"] for g in result if g.get("game_id")]
     if game_ids:
-        k_props_map = get_pitcher_strikeout_props(game_ids)
+        k_props_map     = get_pitcher_strikeout_props(game_ids)
+        team_totals_map = get_team_total_odds(game_ids)
         n_with_props = sum(1 for v in k_props_map.values() if v)
+        n_with_tt    = sum(1 for v in team_totals_map.values() if v)
         if n_with_props:
             print(f"  [PROPS] K-props disponibles para {n_with_props} partido(s)")
+        if n_with_tt:
+            print(f"  [PROPS] Team totals disponibles para {n_with_tt} partido(s)")
         for g in result:
             gid   = g.get("game_id", "")
             props = k_props_map.get(gid, {})
             g["away_k_prop"] = _match_k_prop(props, (g.get("away_pitcher") or {}).get("name", ""))
             g["home_k_prop"] = _match_k_prop(props, (g.get("home_pitcher") or {}).get("name", ""))
+            tt = team_totals_map.get(gid, {})
+            g["home_team_total"] = tt.get(g.get("home_team", ""))
+            g["away_team_total"] = tt.get(g.get("away_team", ""))
 
     return result
 

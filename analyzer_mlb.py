@@ -1669,11 +1669,24 @@ MAX_F5_PICKS  = 3   # máximo F5 picks por día (mercado más estrecho)
 _F5_MIN_EDGE       = 0.05    # rango del nicho (algo más exigente que K-props: σ mayor)
 _F5_MAX_EDGE       = 0.18    # solo rechaza edges absurdos (error de datos); el F5 es niche
 _F5_MIN_PROB       = 0.52    # sobre breakeven de -110 (sin Platt — ver nota abajo)
-_F5_MARKET_ANCHOR  = 0.60    # ancla al mercado (opción 2), igual que K-props
+_F5_MARKET_ANCHOR  = 0.35    # F5 track record: 62% WR — confiamos más en el modelo que en K-props
 _F5_MIN_MU_MARGIN  = 0.40    # |proyección − línea F5| mínima en carreras
 _F5_MIN_TEAM_RUNS  = 1.8     # OVER: cada equipo debe proyectar ≥ 1.8 carreras en F5
 _F5_MIN_WEAK_XFIP  = 3.90    # OVER: al menos un pitcher débil
 _F5_ELITE_XFIP     = 3.60    # UNDER: al menos un abridor élite (la tesis del F5 inflado)
+
+# Señal 1 — K% del lineup confirmado ajusta expected runs del equipo ofensor.
+# Mecanismo: más Ks = menos balls in play = menos carreras.
+# Sensibilidad empírica: cada 1pp de K% sobre la media ≈ -0.4% en runs.
+# Cap ±8%: no sobrepesar una sola señal.
+_F5_LINEUP_K_SENSITIVITY = 0.40   # pass-through de K% → runs (40%)
+_F5_LINEUP_K_CAP         = 0.08   # ajuste máximo ±8% sobre expected runs
+
+# Señal 2 — IP reciente: gate binario para OVERs.
+# Si el pitcher promedia < 4.5 IP en últimas 5 salidas, hay riesgo real de
+# que el bullpen entre en el inning 4-5 → el OVER asume esos innings al pitcher
+# pero puede quedar en manos de un relevista que tire fuego. Se bloquea el OVER.
+_F5_MIN_IP_RECENT_OVER   = 4.5    # IP/start reciente mínimo para apostar OVER F5
 
 
 def analyze_f5_game(game: dict, paper: bool = False) -> list[dict]:
@@ -1714,6 +1727,17 @@ def analyze_f5_game(game: dict, paper: bool = False) -> list[dict]:
     home_ip = (home_p.get("ip", 0) or 0)
     away_ip = (away_p.get("ip", 0) or 0)
     if home_ip < 10.0 or away_ip < 10.0:
+        return []
+
+    # Gate de lineup: sin lineup confirmado de ninguno de los dos equipos, el modelo
+    # usa solo OPS promedio de temporada — misma ventana de descuido que otros nichos.
+    # Si al menos un equipo tiene lineup confirmado el pick sigue adelante (parcial).
+    _home_lineup_ok = bool(game.get("home_lineup_k_used"))
+    _away_lineup_ok = bool(game.get("away_lineup_k_used"))
+    if not paper and not (_home_lineup_ok or _away_lineup_ok):
+        away_t = game.get("away_team", "?")
+        home_t = game.get("home_team", "?")
+        print(f"  ⏭ F5 {away_t}@{home_t}: sin lineups confirmados — esperar a la ventana del nicho")
         return []
 
     # xFIP del abridor: usar xFIP_blended directo (splits eliminados — ruido con muestra pequeña)
@@ -1769,6 +1793,34 @@ def analyze_f5_game(game: dict, paper: bool = False) -> list[dict]:
     # Usamos el composite FIP (xFIP + xERA/contacto) para mayor precisión.
     exp_f5_home = round(expected_runs_team(home_ops_eff_f5, away_fip_f5_composite, park_factor, is_home=True)  * F5_SCALE, 2)
     exp_f5_away = round(expected_runs_team(away_ops_eff_f5, home_fip_f5_composite, park_factor, is_home=False) * F5_SCALE, 2)
+
+    # Señal 1 — K% del lineup confirmado: ajusta expected runs del equipo ofensor.
+    # Lineup con K% alto genera menos balls in play → menos carreras esperadas.
+    # Solo aplica si hay lineup confirmado (k_used=True); fallback = sin ajuste.
+    home_k_pct = game.get("home_lineup_k_pct")
+    away_k_pct = game.get("away_lineup_k_pct")
+    home_lineup_k_used = game.get("home_lineup_k_used", False)
+    away_lineup_k_used = game.get("away_lineup_k_used", False)
+
+    if home_lineup_k_used and home_k_pct:
+        delta = (home_k_pct - LEAGUE_AVG_K_RATE_BATTING) / LEAGUE_AVG_K_RATE_BATTING
+        adj   = max(-_F5_LINEUP_K_CAP, min(_F5_LINEUP_K_CAP, -delta * _F5_LINEUP_K_SENSITIVITY))
+        exp_f5_home = round(exp_f5_home * (1 + adj), 2)
+
+    if away_lineup_k_used and away_k_pct:
+        delta = (away_k_pct - LEAGUE_AVG_K_RATE_BATTING) / LEAGUE_AVG_K_RATE_BATTING
+        adj   = max(-_F5_LINEUP_K_CAP, min(_F5_LINEUP_K_CAP, -delta * _F5_LINEUP_K_SENSITIVITY))
+        exp_f5_away = round(exp_f5_away * (1 + adj), 2)
+
+    # Señal 2 — Durabilidad IP reciente: gate binario para OVERs.
+    # Si un pitcher promedia < 4.5 IP en últimas 5 salidas, el bullpen puede
+    # entrar en el inning 4 o 5 y el OVER queda en manos de relevistas.
+    home_ip_recent_per = None
+    away_ip_recent_per = None
+    if home_p.get("ip_recent") and home_p.get("n_starts_recent", 0) >= 3:
+        home_ip_recent_per = home_p["ip_recent"] / home_p["n_starts_recent"]
+    if away_p.get("ip_recent") and away_p.get("n_starts_recent", 0) >= 3:
+        away_ip_recent_per = away_p["ip_recent"] / away_p["n_starts_recent"]
 
     # Clima y árbitro eliminados del modelo F5 (misma razón que totales: R²<0.5%)
     mu_f5    = round(exp_f5_home + exp_f5_away, 2)
@@ -1877,10 +1929,18 @@ def analyze_f5_game(game: dict, paper: bool = False) -> list[dict]:
     if _F5_MIN_EDGE <= edge_over <= _F5_MAX_EDGE and p_over >= _F5_MIN_PROB:
         if exp_f5_home >= _F5_MIN_TEAM_RUNS and exp_f5_away >= _F5_MIN_TEAM_RUNS:
             if mu_f5 - f5_line >= _F5_MIN_MU_MARGIN:
-                # Al menos un pitcher débil (usando composite para consistencia con el modelo)
                 if max(away_fip_f5_composite, home_fip_f5_composite) >= _F5_MIN_WEAK_XFIP:
-                    p = _build_f5_pick("OVER", edge_over, p_over, fair_over)
-                    picks.append(p)
+                    # Señal 2 — Gate IP reciente: bloquea OVER si algún pitcher
+                    # raramente llega al inning 5 (riesgo de bullpen en la ventana F5)
+                    _home_ip_ok = home_ip_recent_per is None or home_ip_recent_per >= _F5_MIN_IP_RECENT_OVER
+                    _away_ip_ok = away_ip_recent_per is None or away_ip_recent_per >= _F5_MIN_IP_RECENT_OVER
+                    if _home_ip_ok and _away_ip_ok:
+                        p = _build_f5_pick("OVER", edge_over, p_over, fair_over)
+                        picks.append(p)
+                    else:
+                        _short_pitcher = home_p.get("name") if not _home_ip_ok else away_p.get("name")
+                        _ip_val = home_ip_recent_per if not _home_ip_ok else away_ip_recent_per
+                        print(f"  ⏭ F5 OVER bloqueado — {_short_pitcher} promedia {_ip_val:.1f} IP/start reciente (<{_F5_MIN_IP_RECENT_OVER})")
 
     # Evaluar UNDER F5 — LA tesis original del nicho: la casa deriva la línea
     # F5 mecánicamente del total del partido; cuando los bullpens son malos el
@@ -2759,6 +2819,137 @@ def analyze_tb_props(game: dict, _agent_cfg: dict | None = None,
                 picks.append(_build("UNDER", edge_under, p_under, fair_under, int(under_odds)))
 
     return sorted(picks, key=lambda p: p["edge"], reverse=True)
+
+
+_MIN_EDGE_TEAM_TOTAL  = 0.06   # edge mínimo (tracking mode — más permisivo que apuesta)
+_MAX_EDGE_TEAM_TOTAL  = 0.15   # techo anti-error-de-datos
+_MIN_PROB_TT_OVER     = 0.52
+_MIN_PROB_TT_UNDER    = 0.55
+_TT_MARKET_ANCHOR     = 0.50   # mercado no probado aún → ancla fuerte al 50/50
+
+
+def analyze_team_totals(game: dict, paper: bool = False) -> list[dict]:
+    """
+    Tracking de team run totals (carreras por equipo, juego completo).
+    Señal principal: xFIP del pitcher rival + K% del lineup + OPS del equipo.
+    Siempre tracking-only (stake=0) hasta validar calibración.
+    """
+    picks = []
+
+    if _rain_blocked(game, f"Team-total {game.get('away_team','?')}@{game.get('home_team','?')}"):
+        return []
+
+    home_p = game.get("home_pitcher") or {}
+    away_p = game.get("away_pitcher") or {}
+    if not home_p.get("name") or not away_p.get("name"):
+        return []
+
+    home_tt = game.get("home_team_total")
+    away_tt = game.get("away_team_total")
+    if not home_tt and not away_tt:
+        return []
+
+    park_factor  = game.get("park_factor", 1.0) or 1.0
+    home_ops     = game.get("home_ops") or game.get("home_ops_season") or 0.720
+    away_ops     = game.get("away_ops") or game.get("away_ops_season") or 0.720
+    home_ip  = home_p.get("ip_per_start") or home_p.get("ip_recent_per") or 5.5
+    away_ip  = away_p.get("ip_per_start") or away_p.get("ip_recent_per") or 5.5
+    home_fip = _effective_fip(home_p.get("fip_blended") or home_p.get("xfip_season") or 4.20, home_ip)
+    away_fip = _effective_fip(away_p.get("fip_blended") or away_p.get("xfip_season") or 4.20, away_ip)
+
+    exp_home = expected_runs_team(home_ops, away_fip, park_factor, is_home=True)
+    exp_away = expected_runs_team(away_ops, home_fip, park_factor, is_home=False)
+
+    # Ajuste K% del lineup (mismo mecanismo que F5)
+    home_lineup_k_used = game.get("home_lineup_k_used", False)
+    away_lineup_k_used = game.get("away_lineup_k_used", False)
+    home_k_pct = game.get("home_lineup_k_pct")
+    away_k_pct = game.get("away_lineup_k_pct")
+    if home_lineup_k_used and home_k_pct:
+        delta = (home_k_pct - LEAGUE_AVG_K_RATE_BATTING) / LEAGUE_AVG_K_RATE_BATTING
+        adj = max(-0.08, min(0.08, -delta * 0.40))
+        exp_home = round(exp_home * (1 + adj), 2)
+    if away_lineup_k_used and away_k_pct:
+        delta = (away_k_pct - LEAGUE_AVG_K_RATE_BATTING) / LEAGUE_AVG_K_RATE_BATTING
+        adj = max(-0.08, min(0.08, -delta * 0.40))
+        exp_away = round(exp_away * (1 + adj), 2)
+
+    home_weak      = game.get("home_lineup_weak", 0)  # huecos OPS<0.650 en lineup home
+    away_weak      = game.get("away_lineup_weak", 0)  # huecos OPS<0.650 en lineup away
+    _MAX_WEAK_OVER = 2                                 # máximo huecos permitidos para OVER
+
+    def _eval_side(tt: dict, exp_runs: float, team: str, opp_pitcher_name: str,
+                   lineup_weak: int = 0) -> list[dict]:
+        if not tt or tt.get("line") is None:
+            return []
+        line       = float(tt["line"])
+        over_odds  = tt.get("over_odds")
+        under_odds = tt.get("under_odds")
+        if not over_odds or not under_odds:
+            return []
+
+        lam = max(exp_runs, 0.1)
+        floor_line = int(line)
+        is_half    = (line % 1 != 0)
+        if is_half:
+            p_over  = 1.0 - _poisson_cdf(floor_line, lam)
+            p_under = _poisson_cdf(floor_line, lam)
+        else:
+            p_over  = 1.0 - _poisson_cdf(floor_line, lam)
+            p_under = _poisson_cdf(floor_line - 1, lam)
+
+        from odds_utils import power_devig, american_to_raw_prob
+        impl_over  = american_to_raw_prob(over_odds)
+        impl_under = american_to_raw_prob(under_odds)
+        fair_over, fair_under = power_devig(impl_over, impl_under)
+
+        side_picks = []
+        for direction, p_model, p_fair, odds_val, min_prob in [
+            ("OVER",  p_over,  fair_over,  over_odds,  _MIN_PROB_TT_OVER),
+            ("UNDER", p_under, fair_under, under_odds, _MIN_PROB_TT_UNDER),
+        ]:
+            # OVER requiere lineup sin demasiados huecos (OPS < 0.650) — evita OPS inflado por top
+            if direction == "OVER" and lineup_weak >= _MAX_WEAK_OVER:
+                continue
+            edge = p_model - p_fair
+            if _MIN_EDGE_TEAM_TOTAL <= edge <= _MAX_EDGE_TEAM_TOTAL and p_model >= min_prob:
+                if direction == "OVER" and not (
+                    _PROP_DEAD_ODDS_LO <= int(odds_val) <= _PROP_DEAD_ODDS_HI
+                ):
+                    pass
+                elif direction == "UNDER" and not (
+                    _PROP_DEAD_ODDS_LO <= int(odds_val) <= _PROP_DEAD_ODDS_HI
+                ):
+                    pass
+                else:
+                    continue
+                confianza = "ALTA" if edge >= 0.09 else ("MEDIA" if edge >= 0.07 else "BAJA")
+                side_picks.append({
+                    "type":           "TEAM_TOTAL",
+                    "team":           team,
+                    "opp_pitcher":    opp_pitcher_name,
+                    "direction":      direction,
+                    "line":           line,
+                    "odds":           int(odds_val),
+                    "edge":           round(edge, 4),
+                    "our_prob":       round(p_model, 4),
+                    "fair_prob":      round(p_fair, 4),
+                    "fair_market":    round(p_fair, 4),
+                    "exp_runs":       round(exp_runs, 2),
+                    "confianza":      confianza,
+                    "away_team":      game.get("away_team", ""),
+                    "home_team":      game.get("home_team", ""),
+                    "game_time":      game.get("game_time", ""),
+                    "commence_iso":   game.get("commence_iso", ""),
+                    "tracking_only":  True,
+                })
+        return side_picks
+
+    home_pitcher_name = home_p.get("name", "?")
+    away_pitcher_name = away_p.get("name", "?")
+    picks += _eval_side(home_tt, exp_home, game.get("home_team", ""), away_pitcher_name, home_weak)
+    picks += _eval_side(away_tt, exp_away, game.get("away_team", ""), home_pitcher_name, away_weak)
+    return picks
 
 
 def analyze_all_games_per_agent(games: list[dict]) -> dict:
