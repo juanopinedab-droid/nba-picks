@@ -173,7 +173,6 @@ def run_picks(partido: str | None = None):
     print(f"OK ({len(injury_report)} jugadores con limitaciones)" if injury_report else "Sin datos")
 
     all_game_picks  = []
-    all_prop_picks  = []
     game_results    = []
 
     for game in games:
@@ -230,32 +229,6 @@ def run_picks(partido: str | None = None):
         game_results.append(result)
         all_game_picks.extend(result["picks"])
 
-        # Análisis de props — cuesta 1 request por juego
-        if config.FETCH_PROPS:
-            raw_props = collector.get_player_props(game["game_id"])
-            if raw_props:
-                # Fetch últimos partidos de cada jugador (cacheado por nombre)
-                stat_cols = ["PTS", "REB", "AST", "FG3M"]
-                recent_avgs = {}
-                for prop in raw_props:
-                    name = prop["player"]
-                    if name not in recent_avgs:
-                        recent_avgs[name] = collector.get_player_recent_avg(name, stat_cols)
-
-                prop_picks = analyzer.analyze_player_props(
-                    raw_props, player_stats,
-                    home_b2b, away_b2b, home, away,
-                    game_total=game.get("total_line"),
-                    recent_avgs=recent_avgs,
-                    home_stats=home_stats_adj,
-                    away_stats=away_stats_adj,
-                )
-                # Inyectar commence_time y sport también en props
-                for pick in prop_picks:
-                    pick["commence_time"] = commence
-                    pick["sport"]         = "nba"
-                all_prop_picks.extend(prop_picks)
-
     # ── SECCIÓN 1: PARTIDOS ───────────────────────────────────
     print(f"\n{'━'*58}")
     print(f"{BOLD}  MONEYLINE / SPREAD{RESET}")
@@ -281,24 +254,9 @@ def run_picks(partido: str | None = None):
         print()
         print_no_picks()
 
-    # ── SECCIÓN 2: PLAYER PROPS ───────────────────────────────
-    if config.FETCH_PROPS:
-        print(f"\n{'━'*58}")
-        print(f"{BOLD}  PLAYER PROPS  (Puntos / Rebotes / Asistencias / Triples){RESET}")
-        print(f"{'━'*58}")
-
-        if all_prop_picks:
-            prop_counter = 1
-            for pick in all_prop_picks:
-                print_props_pick(pick, prop_counter)
-                database.save_pick(pick)
-                prop_counter += 1
-        else:
-            print("\n  📭  No hay props con edge suficiente hoy.")
-
-    # ── SECCIÓN 3: BANKROLL ───────────────────────────────────
+    # ── SECCIÓN 2: BANKROLL ───────────────────────────────────
     # Calcular stakes y guardar picks con monto real
-    all_picks_today = all_game_picks + all_prop_picks
+    all_picks_today = all_game_picks
     stake_map = bankroll.calc_stakes_moderado(live_bankroll, all_picks_today)
 
     # Re-guardar picks con stake (la primera vez se guardaron sin stake)
@@ -308,14 +266,14 @@ def run_picks(partido: str | None = None):
 
     bankroll.print_bankroll_section(live_bankroll, all_picks_today, BOLD, RESET)
 
-    # ── SECCIÓN 4: COMBINADAS ─────────────────────────────────
+    # ── SECCIÓN 3: COMBINADAS ─────────────────────────────────
     print(f"\n{'━'*58}")
-    print(f"{BOLD}  COMBINADAS  (Partido + Props){RESET}")
+    print(f"{BOLD}  COMBINADAS{RESET}")
     print(f"{'━'*58}")
-    parlay_list = parlays.build_parlays(all_game_picks, all_prop_picks)
+    parlay_list = parlays.build_parlays(all_game_picks, [])
     parlays.print_parlays(parlay_list, BOLD, RESET)
 
-    total_picks = len(all_game_picks) + len(all_prop_picks)
+    total_picks = len(all_game_picks)
     print_footer(total_picks)
 
 

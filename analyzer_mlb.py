@@ -1942,13 +1942,9 @@ def analyze_f5_game(game: dict, paper: bool = False) -> list[dict]:
                         _ip_val = home_ip_recent_per if not _home_ip_ok else away_ip_recent_per
                         print(f"  ⏭ F5 OVER bloqueado — {_short_pitcher} promedia {_ip_val:.1f} IP/start reciente (<{_F5_MIN_IP_RECENT_OVER})")
 
-    # Evaluar UNDER F5 — LA tesis original del nicho: la casa deriva la línea
-    # F5 mecánicamente del total del partido; cuando los bullpens son malos el
-    # total full-game está inflado y la línea F5 hereda carreras que pertenecen
-    # a los innings 6-9. Condición de la tesis: al menos un abridor ÉLITE
-    # (composite ≤ _F5_ELITE_XFIP) — el caso "abridores mejores de lo que el
-    # total del partido sugiere".
-    if _F5_MIN_EDGE <= edge_under <= _F5_MAX_EDGE and p_under >= _F5_MIN_PROB:
+    # F5 UNDER desactivado: 3W-4L (43% WR) — el OVER tiene 77% WR y es la fortaleza real.
+    # Reactivar cuando haya muestra suficiente para recalibrar.
+    if False and _F5_MIN_EDGE <= edge_under <= _F5_MAX_EDGE and p_under >= _F5_MIN_PROB:
         if f5_line - mu_f5 >= _F5_MIN_MU_MARGIN:
             if min(away_fip_f5_composite, home_fip_f5_composite) <= _F5_ELITE_XFIP:
                 p = _build_f5_pick("UNDER", edge_under, p_under, fair_under)
@@ -2822,7 +2818,7 @@ def analyze_tb_props(game: dict, _agent_cfg: dict | None = None,
 
 
 _MIN_EDGE_TEAM_TOTAL  = 0.06   # edge mínimo (tracking mode — más permisivo que apuesta)
-_MAX_EDGE_TEAM_TOTAL  = 0.15   # techo anti-error-de-datos
+_MAX_EDGE_TEAM_TOTAL  = 0.12   # techo anti-error-de-datos (>12% casi siempre error de modelo)
 _MIN_PROB_TT_OVER     = 0.52
 _MIN_PROB_TT_UNDER    = 0.55
 _TT_MARKET_ANCHOR     = 0.50   # mercado no probado aún → ancla fuerte al 50/50
@@ -2842,6 +2838,11 @@ def analyze_team_totals(game: dict, paper: bool = False) -> list[dict]:
     home_p = game.get("home_pitcher") or {}
     away_p = game.get("away_pitcher") or {}
     if not home_p.get("name") or not away_p.get("name"):
+        return []
+
+    # Mismo gate que F5: sin lineup confirmado de ningún equipo, los stats son solo promedio
+    # de temporada y el edge calculado es ruido. Requiere al menos un lineup real.
+    if not paper and not (game.get("home_lineup_k_used") or game.get("away_lineup_k_used")):
         return []
 
     home_tt = game.get("home_team_total")
@@ -2913,16 +2914,6 @@ def analyze_team_totals(game: dict, paper: bool = False) -> list[dict]:
                 continue
             edge = p_model - p_fair
             if _MIN_EDGE_TEAM_TOTAL <= edge <= _MAX_EDGE_TEAM_TOTAL and p_model >= min_prob:
-                if direction == "OVER" and not (
-                    _PROP_DEAD_ODDS_LO <= int(odds_val) <= _PROP_DEAD_ODDS_HI
-                ):
-                    pass
-                elif direction == "UNDER" and not (
-                    _PROP_DEAD_ODDS_LO <= int(odds_val) <= _PROP_DEAD_ODDS_HI
-                ):
-                    pass
-                else:
-                    continue
                 confianza = "ALTA" if edge >= 0.09 else ("MEDIA" if edge >= 0.07 else "BAJA")
                 side_picks.append({
                     "type":           "TEAM_TOTAL",

@@ -3,11 +3,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-ODDS_API_KEY = os.getenv("ODDS_API_KEY", "")
-NBA_SEASON   = os.getenv("NBA_SEASON", "2025-26")
-MIN_EDGE     = float(os.getenv("MIN_EDGE", "0.04"))
-FETCH_PROPS  = os.getenv("FETCH_PROPS", "true").lower() == "true"
-BANKROLL     = float(os.getenv("BANKROLL", "10000"))
+ODDS_API_KEY       = os.getenv("ODDS_API_KEY", "")
+NBA_SEASON         = os.getenv("NBA_SEASON", "2025-26")
+MIN_EDGE           = float(os.getenv("MIN_EDGE", "0.04"))
+FETCH_PROPS        = os.getenv("FETCH_PROPS", "true").lower() == "true"
+BANKROLL           = float(os.getenv("BANKROLL", "10000"))
+OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY", "")
 
 # Preferimos DraftKings o FanDuel. El sistema usa el mejor precio disponible.
 PREFERRED_BOOKS = ["draftkings", "fanduel", "betmgm", "bovada", "williamhill_us"]

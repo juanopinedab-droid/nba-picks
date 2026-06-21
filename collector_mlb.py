@@ -1203,9 +1203,11 @@ def get_mlb_f5_odds() -> dict[str, dict]:
 
     Retorna dict keyed por (away|home) normalizado con f5_line/odds/impl.
     """
+    # Caché diaria (no por bucket de 4h) — ahorra ~75 requests/día.
+    # Si el mercado F5 no está publicado aún, simplemente no habrá F5 picks ese run;
+    # en el siguiente run del día los datos ya están en caché si el primer fetch tuvo datos.
     cache = _load_daily_cache()
-    hour_bucket = datetime.now().hour // 4
-    cache_key = f"f5_odds_{date.today()}_{hour_bucket}"
+    cache_key = f"f5_odds_{date.today()}"
     if cache_key in cache:
         stored = cache[cache_key]
         return {} if stored.get("__no_f5__") else stored
@@ -1232,12 +1234,20 @@ def get_mlb_f5_odds() -> dict[str, dict]:
                 continue   # juego ya empezó
         except (ValueError, TypeError, KeyError):
             continue
-        # 2. F5 por evento (1 request c/u; solo juegos próximos)
+
+        # 2. F5 + team_totals en UN solo request por evento (antes eran 2 requests separados)
+        gid = e["id"]
+        if f"team_totals_{gid}" in cache:
+            # team_totals ya en caché — solo fetchear F5 si también faltan
+            markets_to_fetch = "totals_1st_5_innings"
+        else:
+            markets_to_fetch = "totals_1st_5_innings,team_totals"
+
         try:
             r = requests.get(
-                f"https://api.the-odds-api.com/v4/sports/baseball_mlb/events/{e['id']}/odds",
+                f"https://api.the-odds-api.com/v4/sports/baseball_mlb/events/{gid}/odds",
                 params={"apiKey": config.ODDS_API_KEY, "regions": "us",
-                        "markets": "totals_1st_5_innings", "oddsFormat": "american"},
+                        "markets": markets_to_fetch, "oddsFormat": "american"},
                 timeout=15,
             )
             if r.status_code != 200:
@@ -1250,18 +1260,35 @@ def get_mlb_f5_odds() -> dict[str, dict]:
         f5_over = f5_under = f5_line = None
         over_list: list[int] = []
         under_list: list[int] = []
+        teams: dict[str, dict] = {}
+
         for book in data.get("bookmakers", []):
             for mkt in book.get("markets", []):
-                if mkt["key"] != "totals_1st_5_innings":
-                    continue
-                o_price = next((o["price"] for o in mkt["outcomes"] if o["name"] == "Over"), None)
-                u_price = next((o["price"] for o in mkt["outcomes"] if o["name"] == "Under"), None)
-                line_val = next((o.get("point") for o in mkt["outcomes"] if o["name"] == "Over"), None)
-                if o_price and u_price and line_val is not None:
-                    if f5_over is None:
-                        f5_over, f5_under, f5_line = o_price, u_price, line_val
-                    over_list.append(o_price)
-                    under_list.append(u_price)
+                if mkt["key"] == "totals_1st_5_innings":
+                    o_price = next((o["price"] for o in mkt["outcomes"] if o["name"] == "Over"), None)
+                    u_price = next((o["price"] for o in mkt["outcomes"] if o["name"] == "Under"), None)
+                    line_val = next((o.get("point") for o in mkt["outcomes"] if o["name"] == "Over"), None)
+                    if o_price and u_price and line_val is not None:
+                        if f5_over is None:
+                            f5_over, f5_under, f5_line = o_price, u_price, line_val
+                        over_list.append(o_price)
+                        under_list.append(u_price)
+                elif mkt["key"] == "team_totals" and not teams:
+                    for outcome in mkt.get("outcomes", []):
+                        team = outcome.get("description", "")
+                        if not team:
+                            continue
+                        if team not in teams:
+                            teams[team] = {"line": outcome.get("point")}
+                        if outcome["name"].lower() == "over":
+                            teams[team]["over_odds"] = outcome.get("price")
+                        else:
+                            teams[team]["under_odds"] = outcome.get("price")
+
+        # Guardar team_totals en caché para que get_pitcher_strikeout_props() no refetchee
+        if teams and f"team_totals_{gid}" not in cache:
+            cache[f"team_totals_{gid}"] = teams
+
         if f5_over is None or f5_line is None:
             continue
 
@@ -1307,63 +1334,49 @@ def get_pitcher_strikeout_props(game_ids: list[str]) -> dict[str, dict]:
     """
     cache     = _load_daily_cache()
     result: dict[str, dict] = {}
+    # Fetchear juegos sin team_totals en cache O con cache vacío (odds aún no publicadas)
     to_fetch  = [gid for gid in game_ids
-                 if f"k_props_{gid}" not in cache or f"team_totals_{gid}" not in cache]
+                 if not cache.get(f"team_totals_{gid}")]
 
-    for gid in to_fetch:
-        url = f"https://api.the-odds-api.com/v4/sports/baseball_mlb/events/{gid}/odds"
-        try:
-            r = requests.get(url, params={
-                "apiKey":     config.ODDS_API_KEY,
-                "regions":    "us",
-                "markets":    "pitcher_strikeouts,team_totals",
-                "oddsFormat": "american",
-            }, timeout=15)
-            r.raise_for_status()
-            data = r.json()
-        except Exception as e:
-            print(f"  ⚠️  K props {gid[:8]}: {e}")
-            cache[f"k_props_{gid}"]    = {}
-            cache[f"team_totals_{gid}"] = {}
-            continue
+    if to_fetch:
+        for gid in to_fetch:
+            url = f"https://api.the-odds-api.com/v4/sports/baseball_mlb/events/{gid}/odds"
+            try:
+                r = requests.get(url, params={
+                    "apiKey":     config.ODDS_API_KEY,
+                    "regions":    "us",
+                    "markets":    "team_totals",
+                    "oddsFormat": "american",
+                }, timeout=15)
+                r.raise_for_status()
+                data = r.json()
+            except Exception as e:
+                print(f"  ⚠️  Team totals {gid[:8]}: {e}")
+                cache[f"team_totals_{gid}"] = {}
+                continue
 
-        pitchers: dict[str, dict] = {}
-        teams: dict[str, dict]    = {}
-        for bk in data.get("bookmakers", []):
-            for mkt in bk.get("markets", []):
-                if mkt["key"] == "pitcher_strikeouts" and not pitchers:
-                    for outcome in mkt.get("outcomes", []):
-                        name = outcome.get("description", "")
-                        if not name:
-                            continue
-                        if name not in pitchers:
-                            pitchers[name] = {"line": outcome.get("point")}
-                        if outcome["name"].lower() == "over":
-                            pitchers[name]["over_odds"] = outcome.get("price")
-                        else:
-                            pitchers[name]["under_odds"] = outcome.get("price")
+            teams: dict[str, dict] = {}
+            for bk in data.get("bookmakers", []):
+                for mkt in bk.get("markets", []):
+                    if mkt["key"] == "team_totals" and not teams:
+                        for outcome in mkt.get("outcomes", []):
+                            team = outcome.get("description", "")
+                            if not team:
+                                continue
+                            if team not in teams:
+                                teams[team] = {"line": outcome.get("point")}
+                            if outcome["name"].lower() == "over":
+                                teams[team]["over_odds"] = outcome.get("price")
+                            else:
+                                teams[team]["under_odds"] = outcome.get("price")
 
-                elif mkt["key"] == "team_totals" and not teams:
-                    for outcome in mkt.get("outcomes", []):
-                        team = outcome.get("description", "")
-                        if not team:
-                            continue
-                        if team not in teams:
-                            teams[team] = {"line": outcome.get("point")}
-                        if outcome["name"].lower() == "over":
-                            teams[team]["over_odds"] = outcome.get("price")
-                        else:
-                            teams[team]["under_odds"] = outcome.get("price")
+            cache[f"team_totals_{gid}"] = teams
 
-        cache[f"k_props_{gid}"]    = pitchers
-        cache[f"team_totals_{gid}"] = teams
+        _save_daily_cache(cache)
 
-    _save_daily_cache(cache)
-
+    # k_props ya no se generan — retornar dict vacío para compatibilidad
     for gid in game_ids:
-        ck = f"k_props_{gid}"
-        if ck in cache:
-            result[gid] = cache[ck]
+        result[gid] = {}
 
     return result
 

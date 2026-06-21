@@ -41,12 +41,14 @@ def setup():
         # Migración: agregar columnas que pueden faltar en DBs existentes
         existing = {r[1] for r in conn.execute("PRAGMA table_info(picks)").fetchall()}
         for col, definition in [
-            ("stake_cop",     "REAL DEFAULT 0"),
-            ("profit_cop",    "REAL DEFAULT 0"),
-            ("sport",         "TEXT DEFAULT 'nba'"),
-            ("commence_time", "TEXT"),
-            ("closing_odds",  "INTEGER"),
-            ("clv",           "REAL"),
+            ("stake_cop",       "REAL DEFAULT 0"),
+            ("profit_cop",      "REAL DEFAULT 0"),
+            ("sport",           "TEXT DEFAULT 'nba'"),
+            ("commence_time",   "TEXT"),
+            ("closing_odds",    "INTEGER"),
+            ("clv",             "REAL"),
+            ("luck_pct",        "INTEGER"),
+            ("atribucion_nota", "TEXT"),
         ]:
             if col not in existing:
                 conn.execute(f"ALTER TABLE picks ADD COLUMN {col} {definition}")
@@ -163,6 +165,43 @@ def get_pending():
             ORDER BY date DESC
         """).fetchall()
     return rows
+
+
+def set_atribucion(pick_id: int, luck_pct: int, nota: str) -> str:
+    """
+    Asigna % de suerte y nota a un pick apostado (stake_cop > 0).
+    Rechaza picks de seguimiento (tracking) para no contaminar el análisis.
+    """
+    if not 0 <= luck_pct <= 100:
+        return f"  ❌ luck_pct debe ser 0-100 (recibido: {luck_pct})"
+
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT stake_cop, result, game, selection FROM picks WHERE id = ?",
+            (pick_id,)
+        ).fetchone()
+
+        if not row:
+            return f"  ❌ Pick #{pick_id} no encontrado."
+
+        stake, result, game, selection = row
+        if not stake or stake == 0:
+            return (f"  ❌ Pick #{pick_id} es tracking (stake $0) — "
+                    f"atribución solo para picks apostados.")
+        if result == "PENDING":
+            return f"  ❌ Pick #{pick_id} aún pendiente — resuelve primero antes de atribuir."
+
+        conn.execute(
+            "UPDATE picks SET luck_pct = ?, atribucion_nota = ? WHERE id = ?",
+            (luck_pct, nota.strip(), pick_id)
+        )
+        conn.commit()
+
+    analysis_pct = 100 - luck_pct
+    return (f"  ✓ Pick #{pick_id} atribuido → "
+            f"🎲 Suerte {luck_pct}% / 🧠 Análisis {analysis_pct}%\n"
+            f"    {game} | {selection}\n"
+            f"    📝 {nota}")
 
 
 def save_closing_odds(pick_id: int, closing_odds: int, clv: float):

@@ -286,6 +286,9 @@ def _display_f5_pick(pick: dict, idx: int) -> None:
     print(f"     Confianza:   {conf}")
     print(f"     Edge:        {edge:.1%}  (nuestra {prob:.1%} vs mercado {fair:.1%})")
     print(f"     Cuota justa: {_fair_american(prob)}  (apostar solo si el mercado ofrece mejor)")
+    if direction == "OVER":
+        print(f"     🎯 En vivo:   esperar pausa tras top 1er inning sin anotar → cuota sube")
+        print(f"                  Ref. pre-game: {odds_str} | buscar mejor en live")
     print(f"     mu F5:       {mu:.1f} carr.  ({pick['exp_away']:.1f} visit. + {pick['exp_home']:.1f} local)")
     print(f"     Abridores:   {pick['away_pitcher']} xFIP {pick.get('away_fip_f5', '?')}  |  "
           f"{pick['home_pitcher']} xFIP {pick.get('home_fip_f5', '?')}")
@@ -364,85 +367,6 @@ def _display_rl_pick(pick: dict, idx: int) -> None:
         print(f"       • {reason}")
 
 
-def _display_k_prop_pick(pick: dict, idx: int) -> None:
-    direction = pick["direction"]
-    pitcher   = pick["pitcher"]
-    team      = pick.get("pitcher_team", "")
-    opp       = pick.get("opp_team", "")
-    line      = pick["line"]
-    odds      = pick.get("odds", -110) or -110
-    odds_str  = f"+{int(odds)}" if int(odds) > 0 else str(int(odds))
-    edge      = pick["edge"]
-    prob      = pick["our_prob"]
-    fair      = pick["fair_market"]
-    conf      = pick["confianza"]
-    lam       = pick["lambda"]
-    k9b       = pick["k9_blended"]
-    k9s       = pick["k9_season"]
-    k9r       = pick["k9_recent"]
-    ip        = pick["ip_per_start"]
-    opp_k     = pick["opp_k_pct"]
-    opp_f     = pick["opp_factor"]
-
-    conf_emoji = {"ALTA": "🔥", "MEDIA": "✅", "FLACA": "🔹", "SOSPECHA": "⚠️", "BAJA": "🔸"}.get(conf, "▸")
-    dir_str    = f"{'OVER' if direction == 'OVER' else 'UNDER'} {line:.1f} Ks"
-
-    game_date = _game_date(pick) if "commence_iso" in pick else None
-    fecha_str = f" ({_fecha_es(game_date)})" if game_date and game_date != date.today() else ""
-
-    print()
-    print(f"  {conf_emoji} {BOLD}K PROP #{idx} — Strikeouts{RESET}")
-    print(f"     {pitcher} ({team})  vs  {opp}")
-    print(f"     ► {dir_str}  ({odds_str})")
-    print(f"     Confianza:   {conf}")
-    print(f"     Edge:        {edge:.1%}  (nuestra {prob:.1%} vs mercado {fair:.1%})")
-    print(f"     Cuota justa: {_fair_american(prob)}  (apostar solo si el mercado ofrece mejor)")
-    print(f"     Lambda:      {lam:.2f} Ks esperados")
-    print(f"     Modelo:      K/9={k9b:.1f} (temp={k9s:.1f} | últ5={k9r:.1f}) × {ip:.1f} IP/start × opp_K={opp_k:.3f} ({opp_f:.2f}×)")
-    print(f"     Hora:        {pick.get('game_time', 'N/D')}{fecha_str}")
-    print(_SEP2)
-
-
-def _display_tb_prop_pick(pick: dict, idx: int) -> None:
-    direction = pick["direction"]
-    player    = pick["player"]
-    team      = pick.get("player_team", "")
-    opp       = pick.get("opp_team", "")
-    line      = pick["line"]
-    odds      = pick.get("odds", -110) or -110
-    odds_str  = f"+{int(odds)}" if int(odds) > 0 else str(int(odds))
-    edge      = pick["edge"]
-    prob      = pick["our_prob"]
-    fair      = pick["fair_market"]
-    conf      = pick["confianza"]
-    lam       = pick["lambda"]
-    xslg_b    = pick["xslg_blended"]
-    xslg_raw  = pick["xslg"]
-    slg_act   = pick["slg_actual"]
-    ab_g      = pick["ab_per_game"]
-    pit_f     = pick["pit_factor"]
-    park_f    = pick["park_factor"]
-    pitcher   = pick.get("opp_pitcher", "")
-    pa        = pick.get("pa", 0)
-
-    conf_emoji = {"ALTA": "🔥", "MEDIA": "✅", "FLACA": "🔹", "SOSPECHA": "⚠️", "BAJA": "🔸"}.get(conf, "▸")
-    dir_str    = f"{'OVER' if direction == 'OVER' else 'UNDER'} {line:.1f} TB"
-
-    game_date = _game_date(pick) if "commence_iso" in pick else None
-    fecha_str = f" ({_fecha_es(game_date)})" if game_date and game_date != date.today() else ""
-
-    print()
-    print(f"  {conf_emoji} {BOLD}TB PROP #{idx} — Total Bases{RESET}")
-    print(f"     {player} ({team})  vs  {opp}")
-    print(f"     ► {dir_str}  ({odds_str})")
-    print(f"     Confianza:   {conf}")
-    print(f"     Edge:        {edge:.1%}  (nuestra {prob:.1%} vs mercado {fair:.1%})")
-    print(f"     Cuota justa: {_fair_american(prob)}  (apostar solo si el mercado ofrece mejor)")
-    print(f"     Lambda:      {lam:.2f} TB esperados")
-    print(f"     Modelo:      xSLG={xslg_b:.3f} (savant={xslg_raw:.3f} | SLG={slg_act:.3f}) × {ab_g:.1f} AB/G × pit={pit_f:.2f}× × park={park_f:.2f}×")
-    print(f"     Pitcher opp: {pitcher}  |  PA temporada: {pa}")
-    print(f"     Hora:        {pick.get('game_time', 'N/D')}{fecha_str}")
-    print(_SEP2)
 
 
 # ── Pipeline principal ────────────────────────────────────────────────────────
@@ -595,14 +519,6 @@ def run_mlb_picks(partido: Optional[str] = None, solo_manana: bool = False,
     ]
     ml_picks = analyzer_mlb.analyze_all_games_ml(games)
     rl_picks = analyzer_mlb.analyze_all_games_rl(games)
-    k_picks  = sorted(
-        [p for g in games for p in analyzer_mlb.analyze_strikeout_props(g, paper=paper)],
-        key=lambda p: p["edge"], reverse=True
-    )
-    tb_picks = sorted(
-        [p for g in games for p in analyzer_mlb.analyze_tb_props(g, paper=paper)],
-        key=lambda p: p["edge"], reverse=True
-    )[:analyzer_mlb._MAX_TB_PROPS]
     tt_picks = sorted(
         [p for g in games for p in analyzer_mlb.analyze_team_totals(g, paper=paper)],
         key=lambda p: p["edge"], reverse=True
@@ -613,7 +529,7 @@ def run_mlb_picks(partido: Optional[str] = None, solo_manana: bool = False,
         analyzer_mlb.ALLOW_UNDER         = _orig_allow_under
         analyzer_mlb._OVER_MIN_MU_MARGIN = _orig_mu_margin
 
-    _total_picks = len(raw_picks) + len(f5_picks) + len(ml_picks) + len(rl_picks) + len(k_picks) + len(tb_picks)
+    _total_picks = len(raw_picks) + len(f5_picks) + len(ml_picks) + len(rl_picks)
 
     # 3. Encabezado
     target_date = date.today() + timedelta(days=1) if solo_manana else date.today()
@@ -683,24 +599,6 @@ def run_mlb_picks(partido: Optional[str] = None, solo_manana: bool = False,
             print(f"    {away} @ {home}  |  Total {line}  |  {ap} ({af_s}) vs {hp} ({hf_s})")
 
     # 8. F5 Picks (Primeros 5 Innings) — segundo mercado del nicho
-    # Filtro de coherencia: K-prop OVER activo para un abridor implica que ese pitcher
-    # se espera dominante (pocos runs permitidos). Un F5 OVER en el mismo partido
-    # contradice esa tesis — bloquearlo evita apostar dos cosas opuestas a la vez.
-    _games_with_k_over = {
-        (kp["away_team"], kp["home_team"])
-        for kp in k_picks
-        if kp.get("direction") == "OVER"
-    }
-    _f5_filtered = []
-    for _f5p in f5_picks:
-        _gk = (_f5p.get("away_team", ""), _f5p.get("home_team", ""))
-        if _f5p.get("direction") == "OVER" and _gk in _games_with_k_over:
-            print(f"  ⏭ F5 OVER bloqueado — {_f5p.get('away_team')} @ {_f5p.get('home_team')}: "
-                  f"contradice K-prop OVER activo (alta K ↔ pitcher dominante ↔ menos runs)")
-        else:
-            _f5_filtered.append(_f5p)
-    f5_picks = _f5_filtered
-
     # F5 BAJA fuera del reporte apostable — solo ALTA y MEDIA tienen nicho demostrado
     f5_baja = [p for p in f5_picks if p.get("confianza") == "BAJA"]
     f5_picks = [p for p in f5_picks if p.get("confianza") != "BAJA"]
@@ -721,9 +619,13 @@ def run_mlb_picks(partido: Optional[str] = None, solo_manana: bool = False,
             database.save_pick(db_p, stake_cop=stake)
 
     if f5_baja:
-        for _b in f5_baja:
-            print(f"  ⏭ F5 BAJA ignorado — {_b.get('away_team')} @ {_b.get('home_team')} "
-                  f"{_b.get('direction')} {_b.get('line')} (edge {_b.get('edge', 0):.1%}) — solo apostamos ALTA/MEDIA")
+        print()
+        print(_SEP)
+        print(f"  {BOLD}📋 F5 BAJA CONFIANZA — Revisar cuota antes de entrar{RESET}")
+        print(_SEP)
+        for idx, _b in enumerate(f5_baja, 1):
+            _display_f5_pick(_b, idx)
+            print(_SEP2)
     else:
         print(f"\n  ℹ️  Sin picks F5 con edge suficiente hoy.")
 
@@ -765,84 +667,7 @@ def run_mlb_picks(partido: Optional[str] = None, solo_manana: bool = False,
     else:
         print(f"\n  ℹ️  Sin picks Run Line con edge suficiente hoy.")
 
-    # 11. Pitcher Strikeout Props
-    if k_picks:
-        print()
-        print(_SEP)
-        # K-props en modo seguimiento: se muestran pero NO se apuestan.
-        # Historial: 24W-35L (41% WR), UNDERs 0W-7L — modelo sin ventaja validada.
-        # Se mantienen para calibración hasta demostrar edge real con ≥50 picks limpios.
-        label = "🧪 K-PROPS PAPER" if paper else "📊 K-PROPS SEGUIMIENTO (no apostar)"
-        print(f"  {BOLD}{label} — Strikeouts{RESET}")
-        print(_SEP)
-        for idx, kp in enumerate(k_picks, 1):
-            _display_k_prop_pick(kp, idx)
-        # Guardar en DB solo para seguimiento (stake=0, context_flag tracking_only)
-        for kp in k_picks:
-            db_p = {
-                "sport":        _SPORT,
-                "game":         f"{kp['away_team']} @ {kp['home_team']}",
-                "selection":    f"{kp['direction']} {kp['line']:.1f} Ks — {kp['pitcher']}",
-                "bet_type":     "K_PROP",
-                "odds":         kp["odds"],
-                "our_prob":     kp["our_prob"],
-                "implied_prob": kp["fair_market"],
-                "edge":         kp["edge"],
-                "confidence":   kp["confianza"],
-                "commence_time": kp.get("commence_iso", ""),
-                "context_flags": json.dumps({
-                    "game_pk":      kp.get("game_pk"),
-                    "pitcher":      kp["pitcher"], "lambda": kp["lambda"],
-                    "team":         kp.get("pitcher_team"),
-                    "hp_umpire":    kp.get("hp_umpire"),
-                    "k9_blended":   kp["k9_blended"], "ip_per_start": kp["ip_per_start"],
-                    "opp_k_pct":    kp["opp_k_pct"],
-                    "paper":        paper,
-                    "tracking_only": True,
-                }),
-            }
-            db_p["member"] = "base"
-            database.save_pick(db_p, stake_cop=0)
-    else:
-        print(f"\n  ℹ️  Sin props de strikeouts con edge suficiente hoy.")
-
-    # 12. Batter Total Bases Props — tracking only (modelo genérico sin nicho demostrado)
-    if tb_picks:
-        print()
-        print(_SEP)
-        print(f"  {BOLD}📊 TB PROPS SEGUIMIENTO (no apostar) — Total Bases{RESET}")
-        print(_SEP)
-        for idx, tp in enumerate(tb_picks, 1):
-            _display_tb_prop_pick(tp, idx)
-        for tp in tb_picks:
-            db_p = {
-                "sport":        _SPORT,
-                "game":         f"{tp['away_team']} @ {tp['home_team']}",
-                "selection":    f"{tp['direction']} {tp['line']:.1f} TB — {tp['player']}",
-                "bet_type":     "TB_PROP",
-                "odds":         tp["odds"],
-                "our_prob":     tp["our_prob"],
-                "implied_prob": tp["fair_market"],
-                "edge":         tp["edge"],
-                "confidence":   tp["confianza"],
-                "commence_time": tp.get("commence_iso", ""),
-                "context_flags": json.dumps({
-                    "game_pk":      tp.get("game_pk"),
-                    "player":       tp["player"],
-                    "team":         tp.get("player_team"),
-                    "lambda":       tp["lambda"],
-                    "xslg_blended": tp["xslg_blended"],
-                    "ab_per_game":  tp["ab_per_game"],
-                    "pit_factor":   tp["pit_factor"],
-                    "park_factor":  tp["park_factor"],
-                    "paper":        paper,
-                    "tracking_only": True,
-                }),
-            }
-            db_p["member"] = "base"
-            database.save_pick(db_p, stake_cop=0)  # siempre tracking, stake=0
-
-    # 12b. Team Run Totals — tracking only
+    # 11. Team Run Totals — tracking only
     if tt_picks:
         print(f"\n{_SEP}")
         print(f"  \033[1m📊 TEAM RUN TOTALS SEGUIMIENTO (no apostar) — Carreras por equipo\033[0m")
@@ -1439,6 +1264,8 @@ def _parse_args():
     parser.add_argument("--resolver",   action="store_true", help="Resolver pendientes")
     parser.add_argument("--resultado",  nargs=2, metavar=("ID", "RESULT"),
                         help="Marcar resultado manual: --resultado 7 WIN")
+    parser.add_argument("--atribuir",   nargs="+", metavar="ARG",
+                        help="Atribuir suerte/analisis: --atribuir ID LUCK_PCT nota")
     parser.add_argument("--pendientes", action="store_true", help="Ver picks pendientes")
     parser.add_argument("--historial",  action="store_true", help="Ver historial + ROI")
     parser.add_argument("--grupo",      action="store_true", help="Ver leaderboard del grupo")
@@ -1461,6 +1288,20 @@ def main():
 
     if args.pendientes:
         _display_pendientes()
+        return
+
+    if args.atribuir:
+        if len(args.atribuir) < 3:
+            print("  ❌ Uso: --atribuir ID LUCK_PCT 'nota explicando qué pasó'")
+            return
+        try:
+            pick_id  = int(args.atribuir[0])
+            luck_pct = int(args.atribuir[1])
+            nota     = " ".join(args.atribuir[2:])
+        except ValueError:
+            print("  ❌ ID y LUCK_PCT deben ser números enteros")
+            return
+        print(database.set_atribucion(pick_id, luck_pct, nota))
         return
 
     if args.resultado:
