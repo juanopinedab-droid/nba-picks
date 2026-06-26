@@ -1,26 +1,64 @@
-# Secretos y configuración local
+# Secretos y configuracion local
 .env
 *.env
 
 # Bases de datos locales (datos personales de apuestas)
 picks_history.db
+picks_history.db.bak
 backtest_data.db
+data/picks.db
+data/backtest.db
+data/polymarket.db
+data/*.db-shm
+data/*.db-wal
+data/*.db-journal
+*.db-shm
+*.db-wal
+*.db-journal
 
-# Cache de datos (se regenera automáticamente)
+# Cache de datos (se regenera automaticamente)
 football_cache.json
+
+# Settings guardados desde el frontend (migrado a SQLite — legacy)
+settings.json
+
+# Encrypted API keys
+keys.json.enc
 __pycache__/
 *.pyc
 *.pyo
+
+# Python virtual environment
+venv/
+.venv/
+env/
 
 # IDEs
 .vscode/
 .idea/
 *.code-workspace
 
-# Windows
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Debug dumps y logs
+dump*.md
+dump*.txt
+*.log
+
+# OS files
 Thumbs.db
 desktop.ini
+.DS_Store
 
-# CLAUDE.md contiene instrucciones del agente, no es necesario para el repo
-# (comentar esta línea si quieres incluirlo)
-# CLAUDE.md
+# Editor swap/temp files
+*.swp
+*.swo
+*~
+.tmp/
+tmp/
+
+# Kilo
+CLAUDE.md
