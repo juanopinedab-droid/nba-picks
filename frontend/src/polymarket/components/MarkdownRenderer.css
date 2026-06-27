@@ -1,0 +1,335 @@
+/* ===== NekoDocs-ported Markdown Styles ===== */
+/* Scoped under the container class, does not leak to Tailwind app. */
+
+.md-render {
+  --md-accent: #5dade2;
+  --md-accent-link: #5dade2;
+  --md-text-primary: #e2e8f0;
+  --md-text-muted: #94a3b8;
+  --md-code-inline: #f0c674;
+  --md-bg-code: rgba(0, 0, 0, 0.25);
+  --md-border: rgba(255, 255, 255, 0.08);
+  --md-callout-warning-bg: rgba(255, 183, 77, 0.12);
+  --md-callout-warning-border: #ffb74d;
+  --md-callout-info-bg: rgba(100, 181, 246, 0.12);
+  --md-callout-info-border: #64b5f6;
+  --md-callout-tip-bg: rgba(129, 199, 132, 0.12);
+  --md-callout-tip-border: #81c784;
+  --md-callout-caution-bg: rgba(229, 115, 115, 0.12);
+  --md-callout-caution-border: #e57373;
+  --md-callout-note-bg: rgba(186, 104, 200, 0.12);
+  --md-callout-note-border: #ba68c8;
+
+  font-size: 0.875rem;
+  line-height: 1.7;
+  color: var(--md-text-primary);
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+.md-render h1,
+.md-render h2 {
+  margin-bottom: 0.75rem;
+  margin-top: 1.25rem;
+  font-weight: 700;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  padding-bottom: 0.4rem;
+}
+
+.md-render h1 { font-size: 1.35rem; }
+.md-render h2 { font-size: 1.15rem; }
+.md-render h3 { font-size: 1rem; margin-top: 1rem; margin-bottom: 0.5rem; font-weight: 600; }
+.md-render h4,
+.md-render h5,
+.md-render h6 { font-size: 0.9rem; margin-top: 0.9rem; margin-bottom: 0.4rem; font-weight: 600; }
+
+.md-render p {
+  margin-bottom: 0.9rem;
+}
+
+/* ===== Inline Code ===== */
+.md-render :not(pre) > code {
+  background-color: var(--md-bg-code);
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 0.82em;
+  font-family: 'JetBrains Mono', monospace;
+  border: 1px solid var(--md-border);
+  color: var(--md-code-inline);
+}
+
+/* ===== Code Blocks ===== */
+.md-render pre {
+  position: relative;
+  overflow-x: auto;
+  border-radius: 8px;
+  margin: 1rem 0;
+  border: 1px solid var(--md-border);
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.md-render pre code {
+  display: block;
+  padding: 1rem 1.25rem;
+  font-size: 0.82em;
+  line-height: 1.55;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* ===== Copy Button ===== */
+.md-render .code-copy-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  padding: 4px 6px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.2s ease, background-color 0.2s ease;
+  z-index: 2;
+}
+
+.md-render pre:hover .code-copy-btn {
+  opacity: 1;
+}
+
+.md-render .code-copy-btn:hover {
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.md-render .code-copy-btn img {
+  width: 16px;
+  height: 16px;
+  filter: invert(1);
+}
+
+/* ===== Blockquotes ===== */
+.md-render blockquote {
+  border-left: 4px solid var(--md-accent);
+  background-color: rgba(0, 0, 0, 0.15);
+  padding: 0.85rem 1.25rem;
+  margin: 1rem 0;
+  border-radius: 0 6px 6px 0;
+  color: var(--md-text-muted);
+  font-style: italic;
+}
+
+.md-render blockquote p {
+  margin-bottom: 0;
+}
+
+/* ===== Tables ===== */
+.md-render .table-wrapper {
+  width: 100%;
+  overflow-x: auto;
+  margin: 1.25rem 0;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.md-render table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85em;
+}
+
+.md-render thead th {
+  background-color: rgba(0, 0, 0, 0.25);
+  text-align: left;
+  padding: 0.6rem 0.85rem;
+  border-bottom: 2px solid rgba(255, 255, 255, 0.15);
+  white-space: nowrap;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  color: #e0d0c8;
+}
+
+.md-render tbody td {
+  padding: 0.5rem 0.85rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.md-render tbody tr:nth-child(even) {
+  background-color: rgba(0, 0, 0, 0.08);
+}
+
+.md-render tbody tr:hover {
+  background-color: rgba(255, 255, 255, 0.04);
+}
+
+/* ===== Lists ===== */
+.md-render ul,
+.md-render ol {
+  padding-left: 1.5rem;
+  margin: 0.75rem 0;
+}
+
+.md-render li {
+  margin-bottom: 0.35rem;
+  line-height: 1.6;
+}
+
+.md-render li > ul,
+.md-render li > ol {
+  margin-top: 0.35rem;
+  margin-bottom: 0;
+}
+
+/* ===== Horizontal Rules ===== */
+.md-render hr {
+  border: none;
+  height: 1px;
+  background: linear-gradient(to right, transparent, rgba(255, 255, 255, 0.2), transparent);
+  margin: 1.5rem 0;
+}
+
+/* ===== Links ===== */
+.md-render a {
+  color: var(--md-accent-link);
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  transition: border-color 0.2s ease;
+}
+
+.md-render a:hover {
+  border-bottom-color: var(--md-accent-link);
+}
+
+/* ===== Strong / Emphasis ===== */
+.md-render strong {
+  color: var(--md-text-primary);
+  font-weight: 700;
+}
+
+.md-render em {
+  color: rgba(226, 232, 240, 0.8);
+  font-style: italic;
+}
+
+/* ===== Callouts ===== */
+.md-render .custom-callout {
+  display: flex;
+  gap: 0.75rem;
+  align-items: flex-start;
+  padding: 1rem 1.25rem;
+  margin: 1rem 0;
+  border-radius: 8px;
+  border-left: 4px solid;
+}
+
+.md-render .callout-icon {
+  flex-shrink: 0;
+  line-height: 1;
+  display: flex;
+}
+
+.md-render .callout-icon svg {
+  width: 1.25em;
+  height: 1.25em;
+  stroke: currentColor;
+  stroke-width: 2.2;
+}
+
+.md-render .callout-content {
+  flex: 1;
+  line-height: 1.6;
+}
+
+.md-render .callout-warning {
+  background-color: var(--md-callout-warning-bg);
+  border-left-color: var(--md-callout-warning-border);
+}
+
+.md-render .callout-info {
+  background-color: var(--md-callout-info-bg);
+  border-left-color: var(--md-callout-info-border);
+}
+
+.md-render .callout-tip {
+  background-color: var(--md-callout-tip-bg);
+  border-left-color: var(--md-callout-tip-border);
+}
+
+.md-render .callout-caution {
+  background-color: var(--md-callout-caution-bg);
+  border-left-color: var(--md-callout-caution-border);
+}
+
+.md-render .callout-note {
+  background-color: var(--md-callout-note-bg);
+  border-left-color: var(--md-callout-note-border);
+}
+
+/* ===== Tabs ===== */
+.md-render .tabs-container {
+  margin: 1rem 0;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+}
+
+.md-render .tabs-header {
+  display: flex;
+  background: rgba(0, 0, 0, 0.1);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.md-render .tab-btn {
+  padding: 0.55rem 1rem;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--md-text-muted);
+  cursor: pointer;
+  font-family: 'Inter', sans-serif;
+  font-size: 0.82em;
+  transition: color 0.2s ease, border-color 0.2s ease, background-color 0.2s ease;
+}
+
+.md-render .tab-btn:hover {
+  color: var(--md-text-primary);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.md-render .tab-btn.tab-active {
+  color: var(--md-text-primary);
+  border-bottom-color: var(--md-accent);
+  background: rgba(255, 255, 255, 0.05);
+  font-weight: 600;
+}
+
+.md-render .tab-panel {
+  display: none;
+  padding: 1rem 1.25rem;
+  line-height: 1.6;
+}
+
+.md-render .tab-panel.tab-panel-active {
+  display: block;
+}
+
+/* ===== Mermaid ===== */
+.md-render pre.mermaid {
+  background: rgba(0, 0, 0, 0.2);
+  padding: 1.25rem;
+  display: flex;
+  justify-content: center;
+  border: 1px solid var(--md-border);
+  border-radius: 8px;
+  margin: 1rem 0;
+  overflow-x: auto;
+}
+
+/* ===== Images / Media ===== */
+.md-render img,
+.md-render video {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+  display: block;
+}
